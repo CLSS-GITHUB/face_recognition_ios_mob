@@ -7,7 +7,7 @@ import 'package:logging/logging.dart';
 
 import '../../../../core/utils/camera_image_converter.dart';
 
-typedef OnFrame = void Function(
+typedef OnFrame = Future<void> Function(
   CameraImage raw,
   InputImage forMlKit,
 );
@@ -85,7 +85,7 @@ class _CameraPreviewWidgetState extends State<CameraPreviewWidget> {
     _busy = true;
     Future.microtask(() async {
       try {
-        widget.onFrame(image, input);
+        await widget.onFrame(image, input);
       } finally {
         _busy = false;
       }

@@ -16,7 +16,9 @@ FaceData _face({
   double? rightEye = 0.9,
 }) =>
     FaceData(
-      boundingBox: bbox ?? const Rect.fromLTWH(440, 600, 200, 200),
+      // Centered on the 1080x1920 frame; 300x300 = 4.34% face area, just
+      // above the 4% face-too-small gate.
+      boundingBox: bbox ?? const Rect.fromLTWH(390, 810, 300, 300),
       landmarks: <FaceLandmarkType, Point<int>>{},
       headEulerX: pitch,
       headEulerY: yaw,
@@ -68,7 +70,8 @@ void main() {
 
   test('relaxes horizontal centering during TURN_LEFT', () {
     // ~25% offset from center → still within turning band (40%).
-    final partlyOff = const Rect.fromLTWH(150, 600, 200, 200);
+    // 300x300 keeps face area above the 4% gate.
+    final partlyOff = const Rect.fromLTWH(120, 810, 300, 300);
     final r = assessor.assess(_face(bbox: partlyOff), frame,
         currentStep: LivenessStep.turnLeft, brightness: 150);
     expect(r.isGood, isTrue);
@@ -90,5 +93,12 @@ void main() {
     final r = assessor.assess(
         _face(leftEye: null), frame, brightness: 150);
     expect(r.issues, contains('Eyes not clearly visible'));
+  });
+
+  test('does not flag missing eye probability during BLINK step', () {
+    final r = assessor.assess(_face(leftEye: null, rightEye: null), frame,
+        currentStep: LivenessStep.blink, brightness: 150);
+    expect(r.issues, isNot(contains('Eyes not clearly visible')));
+    expect(r.isGood, isTrue);
   });
 }

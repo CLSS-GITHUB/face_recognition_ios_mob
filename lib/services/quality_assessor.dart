@@ -62,8 +62,12 @@ class QualityAssessor {
       }
     }
 
-    // 5. Eye visibility — required for the BLINK step in particular.
-    if (face.leftEyeOpen == null || face.rightEyeOpen == null) {
+    // 5. Eye visibility — enforced everywhere except the BLINK step.
+    // ML Kit can return null eye-open probabilities on the closed frame of a
+    // real blink (low classifier confidence). Rejecting those frames would
+    // strip the close→open edge the state machine needs.
+    if (currentStep != LivenessStep.blink &&
+        (face.leftEyeOpen == null || face.rightEyeOpen == null)) {
       issues.add('Eyes not clearly visible');
     }
 
