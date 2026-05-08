@@ -79,7 +79,7 @@ class _CameraPreviewWidgetState extends State<CameraPreviewWidget> {
     final input = CameraImageConverter.toInputImage(
       image,
       controller.description,
-      controller.description.sensorOrientation,
+      controller.value.deviceOrientation,
     );
     if (input == null) return;
     _busy = true;

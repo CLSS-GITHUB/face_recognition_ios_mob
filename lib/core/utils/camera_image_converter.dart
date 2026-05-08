@@ -1,8 +1,8 @@
 import 'dart:io';
-import 'dart:typed_data';
-import 'dart:ui';
 
 import 'package:camera/camera.dart';
+import 'package:flutter/foundation.dart';
+import 'package:flutter/services.dart';
 import 'package:google_mlkit_commons/google_mlkit_commons.dart';
 
 /// Bridges `camera`'s `CameraImage` to ML Kit's `InputImage`.
@@ -20,9 +20,9 @@ class CameraImageConverter {
   static InputImage? toInputImage(
     CameraImage image,
     CameraDescription camera,
-    int sensorOrientation,
+    DeviceOrientation deviceOrientation,
   ) {
-    final rotation = _rotationFromCamera(camera, sensorOrientation);
+    final rotation = _rotationFromCamera(camera, deviceOrientation);
     if (rotation == null) return null;
 
     final format = InputImageFormatValue.fromRawValue(image.format.raw);
@@ -47,16 +47,60 @@ class CameraImageConverter {
     );
   }
 
+  /// Compute the rotation hint ML Kit needs to bring the image to its
+  /// natural orientation.
+  ///
+  /// iOS — the camera plugin already reports a device-relative
+  /// `sensorOrientation`, so pass it through.
+  ///
+  /// Android — combine the sensor orientation with the current device
+  /// orientation, with sign depending on lens direction. Front cameras add,
+  /// back cameras subtract. Mirrors the standard ML Kit Flutter sample. The
+  /// previous "pass sensorOrientation through" implementation only worked
+  /// when the device was held in portrait-up; any other orientation
+  /// degraded ML Kit's classifier (eye-open / smiling probabilities) even
+  /// though face detection itself stayed forgiving.
   static InputImageRotation? _rotationFromCamera(
     CameraDescription camera,
-    int sensorOrientation,
+    DeviceOrientation deviceOrientation,
   ) {
     if (Platform.isIOS) {
-      return InputImageRotationValue.fromRawValue(sensorOrientation);
+      return InputImageRotationValue.fromRawValue(camera.sensorOrientation);
     }
-    // Android: front-camera mirrors, back-camera doesn't. The plugin already
-    // accounts for sensor orientation; pass it through.
-    return InputImageRotationValue.fromRawValue(sensorOrientation);
+    final degrees = androidRotationDegrees(
+      sensorOrientation: camera.sensorOrientation,
+      lensDirection: camera.lensDirection,
+      deviceOrientation: deviceOrientation,
+    );
+    return InputImageRotationValue.fromRawValue(degrees);
+  }
+
+  /// Pure-compute helper for the Android rotation formula. Front cameras add
+  /// the device orientation to the sensor orientation; back cameras subtract.
+  /// Result is normalised to `[0, 360)`.
+  @visibleForTesting
+  static int androidRotationDegrees({
+    required int sensorOrientation,
+    required CameraLensDirection lensDirection,
+    required DeviceOrientation deviceOrientation,
+  }) {
+    final device = _deviceOrientationDegrees(deviceOrientation);
+    return lensDirection == CameraLensDirection.front
+        ? (sensorOrientation + device) % 360
+        : (sensorOrientation - device + 360) % 360;
+  }
+
+  static int _deviceOrientationDegrees(DeviceOrientation orientation) {
+    switch (orientation) {
+      case DeviceOrientation.portraitUp:
+        return 0;
+      case DeviceOrientation.landscapeLeft:
+        return 90;
+      case DeviceOrientation.portraitDown:
+        return 180;
+      case DeviceOrientation.landscapeRight:
+        return 270;
+    }
   }
 }
 
