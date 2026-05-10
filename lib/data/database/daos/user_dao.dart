@@ -27,4 +27,12 @@ class UserDao extends DatabaseAccessor<AppDatabase> with _$UserDaoMixin {
 
   Future<int> deleteUser(UserRow user) =>
       (delete(users)..where((t) => t.userId.equals(user.userId))).go();
+
+  /// Stamps `lastVerifiedAt = when` on the user. Used by the verify use case
+  /// after a successful match. Returns the number of rows affected (0 if the
+  /// user no longer exists).
+  Future<int> touchLastVerified(String userId, DateTime when) {
+    return (update(users)..where((t) => t.userId.equals(userId)))
+        .write(UsersCompanion(lastVerifiedAt: Value(when)));
+  }
 }
