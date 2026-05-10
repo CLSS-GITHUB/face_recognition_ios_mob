@@ -13,10 +13,10 @@ class FaceThresholds {
   // Quality (QualityAssessor)
   static const double minBrightness = 45;
   static const double maxBrightness = 245;
-  static const double centeringNormal = 0.20;
-  static const double centeringTurning = 0.40;
-  static const double yawLimit = 25;
-  static const double pitchLimit = 25;
+  static const double centeringNormal = 0.30;
+  static const double centeringTurning = 0.50;
+  static const double yawLimit = 35;
+  static const double pitchLimit = 35;
 
   // Liveness
   static const double eyeClosed = 0.25;

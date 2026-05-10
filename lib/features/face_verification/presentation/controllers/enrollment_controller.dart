@@ -34,6 +34,7 @@ class EnrollmentState {
     required this.capturedImagePath,
     required this.verificationBlinkDetected,
     required this.isVerificationBlinking,
+    required this.verificationEyeOpenSeen,
     required this.verificationStatus,
     required this.showVerificationFailed,
   });
@@ -52,6 +53,7 @@ class EnrollmentState {
         capturedImagePath = null,
         verificationBlinkDetected = false,
         isVerificationBlinking = false,
+        verificationEyeOpenSeen = false,
         verificationStatus = 'Blink to confirm enrollment',
         showVerificationFailed = false;
 
@@ -68,6 +70,7 @@ class EnrollmentState {
   final String? capturedImagePath;
   final bool verificationBlinkDetected;
   final bool isVerificationBlinking;
+  final bool verificationEyeOpenSeen;
   final String verificationStatus;
   final bool showVerificationFailed;
 
@@ -88,6 +91,7 @@ class EnrollmentState {
     String? capturedImagePath,
     bool? verificationBlinkDetected,
     bool? isVerificationBlinking,
+    bool? verificationEyeOpenSeen,
     String? verificationStatus,
     bool? showVerificationFailed,
   }) {
@@ -108,6 +112,8 @@ class EnrollmentState {
           verificationBlinkDetected ?? this.verificationBlinkDetected,
       isVerificationBlinking:
           isVerificationBlinking ?? this.isVerificationBlinking,
+      verificationEyeOpenSeen:
+          verificationEyeOpenSeen ?? this.verificationEyeOpenSeen,
       verificationStatus: verificationStatus ?? this.verificationStatus,
       showVerificationFailed:
           showVerificationFailed ?? this.showVerificationFailed,
@@ -125,6 +131,7 @@ class EnrollmentController extends AutoDisposeNotifier<EnrollmentState> {
   EnrollmentState build() {
     ref.onDispose(() => _disposed = true);
     final liveness = ref.read(livenessStateMachineProvider);
+    liveness.reset();
     liveness.onStepCompleted = (step) {
       if (_disposed) return;
       state = state.copyWith(
@@ -141,20 +148,74 @@ class EnrollmentController extends AutoDisposeNotifier<EnrollmentState> {
   }
 
   // -------------------------------------------------------------- frame --
+  static int _processFrameCalls = 0;
   Future<void> processFrame(CameraImage raw, InputImage forMlKit) async {
-    if (state.isProcessingFrame || state.stage == EnrollmentStage.registration) {
+    final n = ++_processFrameCalls;
+    final rotation = forMlKit.metadata?.rotation;
+    final frameSize = forMlKit.metadata?.size ?? Size.zero;
+
+    if (n <= 5 || n % 30 == 0) {
+      // ignore: avoid_print
+      print('[PROC $n] enter stage=${state.stage} '
+          'size=${frameSize.width.toInt()}x${frameSize.height.toInt()} '
+          'rot=${rotation?.rawValue}');
+    }
+
+    if (state.isProcessingFrame ||
+        state.stage == EnrollmentStage.registration) {
       return;
     }
     final detector = ref.read(faceDetectionServiceProvider);
-    final faces = await detector.detect(forMlKit);
+    List<FaceData> faces;
+    try {
+      faces = await detector.detect(forMlKit).timeout(
+        const Duration(seconds: 3),
+        onTimeout: () {
+          // ignore: avoid_print
+          print('[PROC $n] DETECT TIMEOUT');
+          return const <FaceData>[];
+        },
+      );
+    } catch (e, st) {
+      // ignore: avoid_print
+      print('[PROC $n] DETECT THREW: $e\n$st');
+      return;
+    }
+
+    if (n <= 5 || (faces.isEmpty && n % 30 == 0) || (faces.isNotEmpty && n % 10 == 0)) {
+      // ignore: avoid_print
+      print('[PROC $n] after detect faces=${faces.length}');
+    }
+
     if (_disposed) return;
-    final frameSize = forMlKit.metadata?.size ?? Size.zero;
     final brightness = _approximateBrightness(raw);
+
+    // ML Kit returns face bounding boxes in the ROTATED image's coordinate
+    // space (per the rotation hint we pass in InputImageMetadata). Our raw
+    // frame is 720x480 (landscape) but with rotation270deg ML Kit's bbox is
+    // in 480x720 portrait coords. The quality assessor compares bbox center
+    // against frame dimensions, so it needs the rotated dimensions too —
+    // otherwise centering checks always fail.
+    final isQuarterRotated = rotation == InputImageRotation.rotation90deg ||
+        rotation == InputImageRotation.rotation270deg;
+    final adjustedFrameSize = isQuarterRotated
+        ? Size(frameSize.height, frameSize.width)
+        : frameSize;
+
+    if (faces.isNotEmpty) {
+      final face = faces.first;
+      if (n % 10 == 0) {
+        // ignore: avoid_print
+        print('[PROC $n] face: box=${face.boundingBox} '
+            'lEye=${face.leftEyeOpen?.toStringAsFixed(2)} '
+            'rEye=${face.rightEyeOpen?.toStringAsFixed(2)}');
+      }
+    }
 
     if (faces.length > 1) {
       state = state.copyWith(
         faces: faces,
-        frameSize: frameSize,
+        frameSize: adjustedFrameSize,
         quality: const QualityResult.failed(
             ['Multiple faces detected. Only one person allowed.']),
       );
@@ -163,20 +224,20 @@ class EnrollmentController extends AutoDisposeNotifier<EnrollmentState> {
     if (faces.isEmpty) {
       state = state.copyWith(
         faces: faces,
-        frameSize: frameSize,
+        frameSize: adjustedFrameSize,
         quality: const QualityResult.failed(['No face detected']),
       );
       return;
     }
 
     final face = faces.first;
-    state = state.copyWith(faces: faces, frameSize: frameSize);
+    state = state.copyWith(faces: faces, frameSize: adjustedFrameSize);
 
     switch (state.stage) {
       case EnrollmentStage.liveness:
-        await _handleLivenessStage(raw, face, frameSize, brightness);
+        await _handleLivenessStage(raw, face, adjustedFrameSize, brightness);
       case EnrollmentStage.verify:
-        await _handleVerifyStage(raw, face, frameSize, brightness);
+        await _handleVerifyStage(raw, face, adjustedFrameSize, brightness);
       case EnrollmentStage.registration:
         break;
     }
@@ -194,6 +255,11 @@ class EnrollmentController extends AutoDisposeNotifier<EnrollmentState> {
 
     final quality = assessor.assess(face, frameSize,
         currentStep: liveness.currentStep, brightness: brightness);
+    // ignore: avoid_print
+    print('[STAGE] step=${liveness.currentStep} qualityOk=${quality.isGood} '
+        'issues=${quality.issues} brightness=${brightness.toStringAsFixed(0)} '
+        'yaw=${face.headEulerY.toStringAsFixed(1)} '
+        'pitch=${face.headEulerX.toStringAsFixed(1)}');
     state = state.copyWith(quality: quality, currentStep: liveness.currentStep);
     if (!quality.isGood) return;
 
@@ -272,26 +338,33 @@ class EnrollmentController extends AutoDisposeNotifier<EnrollmentState> {
   ) async {
     if (state.isProcessingFrame) return;
     final assessor = ref.read(qualityAssessorProvider);
-    final quality =
-        assessor.assess(face, frameSize, brightness: brightness);
+    final quality = assessor.assess(face, frameSize,
+        currentStep: LivenessStep.blink, brightness: brightness);
     state = state.copyWith(quality: quality);
     if (!quality.isGood) return;
 
     if (!state.verificationBlinkDetected) {
-      final l = face.leftEyeOpen ?? 1.0;
-      final r = face.rightEyeOpen ?? 1.0;
-      if (l < FaceThresholds.eyeClosed && r < FaceThresholds.eyeClosed) {
+      final lRaw = face.leftEyeOpen;
+      final rRaw = face.rightEyeOpen;
+
+      final l = lRaw ?? (state.verificationEyeOpenSeen ? 0.0 : 1.0);
+      final r = rRaw ?? (state.verificationEyeOpenSeen ? 0.0 : 1.0);
+
+      if (l > FaceThresholds.eyeOpen && r > FaceThresholds.eyeOpen) {
+        state = state.copyWith(verificationEyeOpenSeen: true);
+        if (state.isVerificationBlinking) {
+          state = state.copyWith(
+            verificationBlinkDetected: true,
+            isVerificationBlinking: false,
+            verificationStatus: 'Verifying...',
+          );
+        }
+      } else if (state.verificationEyeOpenSeen &&
+          l < FaceThresholds.eyeClosed &&
+          r < FaceThresholds.eyeClosed) {
         state = state.copyWith(
             isVerificationBlinking: true,
             verificationStatus: 'Blink to verify...');
-      } else if (state.isVerificationBlinking &&
-          l > FaceThresholds.eyeOpen &&
-          r > FaceThresholds.eyeOpen) {
-        state = state.copyWith(
-          verificationBlinkDetected: true,
-          isVerificationBlinking: false,
-          verificationStatus: 'Verifying...',
-        );
       }
       return;
     }
@@ -367,6 +440,7 @@ class EnrollmentController extends AutoDisposeNotifier<EnrollmentState> {
     state = state.copyWith(
       verificationBlinkDetected: false,
       isVerificationBlinking: false,
+      verificationEyeOpenSeen: false,
       showVerificationFailed: false,
       verificationStatus: 'Blink to confirm enrollment',
     );

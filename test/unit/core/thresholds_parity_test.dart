@@ -16,10 +16,10 @@ void main() {
     test('quality constants', () {
       expect(FaceThresholds.minBrightness, 45);
       expect(FaceThresholds.maxBrightness, 245);
-      expect(FaceThresholds.centeringNormal, 0.20);
-      expect(FaceThresholds.centeringTurning, 0.40);
-      expect(FaceThresholds.yawLimit, 25);
-      expect(FaceThresholds.pitchLimit, 25);
+      expect(FaceThresholds.centeringNormal, 0.30);
+      expect(FaceThresholds.centeringTurning, 0.50);
+      expect(FaceThresholds.yawLimit, 35);
+      expect(FaceThresholds.pitchLimit, 35);
     });
 
     test('liveness constants', () {

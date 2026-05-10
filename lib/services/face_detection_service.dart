@@ -15,7 +15,7 @@ class FaceDetectionService {
                 enableClassification: true,
                 enableContours: true,
                 enableTracking: true,
-                minFaceSize: 0.20,
+                minFaceSize: 0.10,
               ),
         );
 

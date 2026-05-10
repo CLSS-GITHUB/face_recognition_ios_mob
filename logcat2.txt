@@ -1,0 +1,31 @@
+﻿--------- beginning of main
+05-10 17:03:30.691 E/gralloc4( 7140): ERROR: Format allocation info not found for format: 3b
+05-10 17:03:30.691 E/gralloc4( 7140): ERROR: Format allocation info not found for format: 0
+05-10 17:03:30.691 E/gralloc4( 7140): Invalid base format! req_base_format = 0x0, req_format = 0x3b, type = 0x0
+05-10 17:03:30.691 E/gralloc4( 7140): ERROR: Unrecognized and/or unsupported format 0x3b and usage 0xb00
+05-10 17:03:30.691 E/Gralloc4( 7140): isSupported(1, 1, 59, 1, ...) failed with 5
+05-10 17:03:30.691 E/GraphicBufferAllocator( 7140): Failed to allocate (4 x 4) layerCount 1 format 59 usage b00: 5
+05-10 17:03:30.691 E/AHardwareBuffer( 7140): GraphicBuffer(w=4, h=4, lc=1) failed (Unknown error -5), handle=0x0
+05-10 17:03:30.691 E/gralloc4( 7140): ERROR: Format allocation info not found for format: 3b
+05-10 17:03:30.691 E/gralloc4( 7140): ERROR: Format allocation info not found for format: 0
+05-10 17:03:30.691 E/gralloc4( 7140): Invalid base format! req_base_format = 0x0, req_format = 0x3b, type = 0x0
+05-10 17:03:30.691 E/gralloc4( 7140): ERROR: Unrecognized and/or unsupported format 0x3b and usage 0xb00
+05-10 17:03:30.691 E/Gralloc4( 7140): isSupported(1, 1, 59, 1, ...) failed with 5
+05-10 17:03:30.692 E/GraphicBufferAllocator( 7140): Failed to allocate (4 x 4) layerCount 1 format 59 usage b00: 5
+05-10 17:03:30.692 E/AHardwareBuffer( 7140): GraphicBuffer(w=4, h=4, lc=1) failed (Unknown error -5), handle=0x0
+05-10 17:03:41.216 E/gralloc4( 7140): ERROR: Format allocation info not found for format: 3b
+05-10 17:03:41.216 E/gralloc4( 7140): ERROR: Format allocation info not found for format: 0
+05-10 17:03:41.216 E/gralloc4( 7140): Invalid base format! req_base_format = 0x0, req_format = 0x3b, type = 0x0
+05-10 17:03:41.216 E/gralloc4( 7140): ERROR: Unrecognized and/or unsupported format 0x3b and usage 0xb00
+05-10 17:03:41.216 E/Gralloc4( 7140): isSupported(1, 1, 59, 1, ...) failed with 5
+05-10 17:03:41.218 E/GraphicBufferAllocator( 7140): Failed to allocate (4 x 4) layerCount 1 format 59 usage b00: 5
+05-10 17:03:41.218 E/AHardwareBuffer( 7140): GraphicBuffer(w=4, h=4, lc=1) failed (Unknown error -5), handle=0x0
+05-10 17:03:41.218 E/gralloc4( 7140): ERROR: Format allocation info not found for format: 3b
+05-10 17:03:41.218 E/gralloc4( 7140): ERROR: Format allocation info not found for format: 0
+05-10 17:03:41.218 E/gralloc4( 7140): Invalid base format! req_base_format = 0x0, req_format = 0x3b, type = 0x0
+05-10 17:03:41.218 E/gralloc4( 7140): ERROR: Unrecognized and/or unsupported format 0x3b and usage 0xb00
+05-10 17:03:41.218 E/Gralloc4( 7140): isSupported(1, 1, 59, 1, ...) failed with 5
+05-10 17:03:41.218 E/GraphicBufferAllocator( 7140): Failed to allocate (4 x 4) layerCount 1 format 59 usage b00: 5
+05-10 17:03:41.218 E/AHardwareBuffer( 7140): GraphicBuffer(w=4, h=4, lc=1) failed (Unknown error -5), handle=0x0
+05-10 17:03:41.232 W/ace_ios_android( 7140): userfaultfd: MOVE ioctl seems unsupported: Try again
+05-10 17:03:41.393 W/WindowOnBackDispatcher( 7140): sendCancelIfRunning: isInProgress=false callback=io.flutter.embedding.android.FlutterActivity$1@6b73fca

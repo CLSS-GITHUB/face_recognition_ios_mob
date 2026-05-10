@@ -40,9 +40,10 @@ final templateCryptoProvider = Provider<TemplateCrypto>((_) => TemplateCrypto())
 
 // ----------------------- Phase 2 face pipeline -----------------------------
 
-/// ML Kit face detector. Disposes when last listener is gone.
-final faceDetectionServiceProvider =
-    Provider.autoDispose<FaceDetectionService>((ref) {
+/// ML Kit face detector — app-lifetime singleton. (Was autoDispose; that
+/// caused the detector to get closed between frames during enrollment,
+/// hanging every `processImage` call.)
+final faceDetectionServiceProvider = Provider<FaceDetectionService>((ref) {
   final s = FaceDetectionService();
   ref.onDispose(s.dispose);
   return s;
@@ -51,9 +52,13 @@ final faceDetectionServiceProvider =
 final qualityAssessorProvider =
     Provider<QualityAssessor>((_) => const QualityAssessor());
 
-/// One state machine instance per screen scope.
+/// One state machine instance, kept alive across frames. Was autoDispose;
+/// since callers only `ref.read` it, autoDispose recreated the instance on
+/// every read — `_hasSeenOpen`/`_isBlinking` reset every frame and the blink
+/// step could never complete. The controller calls `.reset()` on retry, so a
+/// shared instance is safe.
 final livenessStateMachineProvider =
-    Provider.autoDispose<LivenessStateMachine>((_) => LivenessStateMachine());
+    Provider<LivenessStateMachine>((_) => LivenessStateMachine());
 
 /// TFLite interpreter — one shared instance across screens. Closes on app
 /// teardown. Wrapped in a FutureProvider because asset load is async.

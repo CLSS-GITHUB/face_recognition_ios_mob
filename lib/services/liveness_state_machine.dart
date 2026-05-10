@@ -31,6 +31,7 @@ class LivenessStateMachine {
 
   int _index = 0;
   bool _isBlinking = false;
+  bool _hasSeenOpen = false;
   bool _isMouthOpen = false;
 
   LivenessStep? get currentStep =>
@@ -42,6 +43,7 @@ class LivenessStateMachine {
   void reset() {
     _index = 0;
     _isBlinking = false;
+    _hasSeenOpen = false;
     _isMouthOpen = false;
   }
 
@@ -70,16 +72,39 @@ class LivenessStateMachine {
   }
 
   bool _processBlink(FaceData face) {
-    final l = face.leftEyeOpen ?? 1.0;
-    final r = face.rightEyeOpen ?? 1.0;
-    if (l < FaceThresholds.eyeClosed && r < FaceThresholds.eyeClosed) {
+    final lRaw = face.leftEyeOpen;
+    final rRaw = face.rightEyeOpen;
+
+    // ML Kit might return null when eyes are closed or if it loses track.
+    // If we've seen them open, we treat null as closed. Otherwise we ignore.
+    final l = lRaw ?? (_hasSeenOpen ? 0.0 : 1.0);
+    final r = rRaw ?? (_hasSeenOpen ? 0.0 : 1.0);
+
+    // ignore: avoid_print
+    print('[BLINK] l=${lRaw?.toStringAsFixed(3) ?? 'NULL'} '
+        'r=${rRaw?.toStringAsFixed(3) ?? 'NULL'} '
+        'effective(l=${l.toStringAsFixed(1)}, r=${r.toStringAsFixed(1)}) '
+        'hasSeenOpen=$_hasSeenOpen isBlinking=$_isBlinking');
+
+    if (l > FaceThresholds.eyeOpen && r > FaceThresholds.eyeOpen) {
+      _hasSeenOpen = true;
+      if (_isBlinking) {
+        // ignore: avoid_print
+        print('[BLINK] -> OPEN after close, ADVANCING');
+        _isBlinking = false;
+        _hasSeenOpen = false; // Reset for potential future re-enroll
+        return true;
+      }
+    } else if (_hasSeenOpen &&
+        l < FaceThresholds.eyeClosed &&
+        r < FaceThresholds.eyeClosed) {
+      if (!_isBlinking) {
+        // ignore: avoid_print
+        print('[BLINK] -> CLOSED detected');
+      }
       _isBlinking = true;
-    } else if (_isBlinking &&
-        l > FaceThresholds.eyeOpen &&
-        r > FaceThresholds.eyeOpen) {
-      _isBlinking = false;
-      return true;
     }
+
     return false;
   }
 

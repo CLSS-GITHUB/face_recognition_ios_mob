@@ -38,6 +38,7 @@ class _CameraPreviewWidgetState extends State<CameraPreviewWidget> {
   CameraController? _controller;
   bool _busy = false;
   String? _error;
+  int _diagFrames = 0;
 
   @override
   void initState() {
@@ -74,6 +75,12 @@ class _CameraPreviewWidgetState extends State<CameraPreviewWidget> {
   }
 
   void _onCameraImage(CameraImage image) {
+    _diagFrames++;
+    if (_diagFrames <= 10 || _diagFrames % 30 == 0) {
+      // ignore: avoid_print
+      print('[FRAME $_diagFrames] busy=$_busy '
+          'formatRaw=${image.format.raw} group=${image.format.group}');
+    }
     final controller = _controller;
     if (controller == null || _busy) return;
     final input = CameraImageConverter.toInputImage(
@@ -81,6 +88,12 @@ class _CameraPreviewWidgetState extends State<CameraPreviewWidget> {
       controller.description,
       controller.value.deviceOrientation,
     );
+    if (_diagFrames <= 10) {
+      // ignore: avoid_print
+      print('[FRAME $_diagFrames] devOrient=${controller.value.deviceOrientation} '
+          'sensor=${controller.description.sensorOrientation} '
+          'inputImage=${input == null ? "NULL" : "OK"}');
+    }
     if (input == null) return;
     _busy = true;
     Future.microtask(() async {

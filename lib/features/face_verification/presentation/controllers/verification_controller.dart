@@ -13,6 +13,7 @@ import '../../../../core/di/providers.dart';
 import '../../../../core/utils/bitmap_utils.dart';
 import '../../../../core/utils/camera_image_converter.dart';
 import '../../domain/entities/face_data.dart';
+import '../../domain/entities/liveness_step.dart';
 import '../../domain/entities/quality_result.dart';
 import '../../domain/entities/user.dart';
 import '../../domain/repositories/user_repository.dart';
@@ -28,6 +29,7 @@ class VerificationState {
     required this.showResult,
     required this.blinkDetected,
     required this.isBlinking,
+    required this.eyeOpenSeen,
     required this.flat,
     required this.isReady,
     required this.bestSimilarity,
@@ -43,6 +45,7 @@ class VerificationState {
         showResult = false,
         blinkDetected = false,
         isBlinking = false,
+        eyeOpenSeen = false,
         flat = null,
         isReady = false,
         bestSimilarity = 0;
@@ -56,6 +59,7 @@ class VerificationState {
   final bool showResult;
   final bool blinkDetected;
   final bool isBlinking;
+  final bool eyeOpenSeen;
   final FlatTemplates? flat;
   final bool isReady;
   final double bestSimilarity;
@@ -72,6 +76,7 @@ class VerificationState {
     bool? showResult,
     bool? blinkDetected,
     bool? isBlinking,
+    bool? eyeOpenSeen,
     FlatTemplates? flat,
     bool? isReady,
     double? bestSimilarity,
@@ -87,6 +92,7 @@ class VerificationState {
       showResult: showResult ?? this.showResult,
       blinkDetected: blinkDetected ?? this.blinkDetected,
       isBlinking: isBlinking ?? this.isBlinking,
+      eyeOpenSeen: eyeOpenSeen ?? this.eyeOpenSeen,
       flat: flat ?? this.flat,
       isReady: isReady ?? this.isReady,
       bestSimilarity: bestSimilarity ?? this.bestSimilarity,
@@ -131,7 +137,15 @@ class VerificationController extends AutoDisposeNotifier<VerificationState> {
     final detector = ref.read(faceDetectionServiceProvider);
     final faces = await detector.detect(forMlKit);
     if (_disposed) return;
-    final frameSize = forMlKit.metadata?.size ?? Size.zero;
+    final rawFrameSize = forMlKit.metadata?.size ?? Size.zero;
+    // ML Kit returns bbox in rotated coords; match frame dims so centering
+    // checks compare like-for-like. (Same fix as EnrollmentController.)
+    final rotation = forMlKit.metadata?.rotation;
+    final isQuarterRotated = rotation == InputImageRotation.rotation90deg ||
+        rotation == InputImageRotation.rotation270deg;
+    final frameSize = isQuarterRotated
+        ? Size(rawFrameSize.height, rawFrameSize.width)
+        : rawFrameSize;
     final brightness = _approximateBrightness(raw);
 
     if (faces.length > 1) {
@@ -156,25 +170,34 @@ class VerificationController extends AutoDisposeNotifier<VerificationState> {
     state = state.copyWith(faces: faces, frameSize: frameSize);
 
     final assessor = ref.read(qualityAssessorProvider);
-    final quality =
-        assessor.assess(face, frameSize, brightness: brightness);
+    final quality = assessor.assess(face, frameSize,
+        currentStep: state.blinkDetected ? null : LivenessStep.blink,
+        brightness: brightness);
     state = state.copyWith(quality: quality);
     if (!quality.isGood) return;
 
     if (!state.blinkDetected) {
-      final l = face.leftEyeOpen ?? 1.0;
-      final r = face.rightEyeOpen ?? 1.0;
-      if (l < FaceThresholds.eyeClosed && r < FaceThresholds.eyeClosed) {
+      final lRaw = face.leftEyeOpen;
+      final rRaw = face.rightEyeOpen;
+
+      final l = lRaw ?? (state.eyeOpenSeen ? 0.0 : 1.0);
+      final r = rRaw ?? (state.eyeOpenSeen ? 0.0 : 1.0);
+
+      if (l > FaceThresholds.eyeOpen && r > FaceThresholds.eyeOpen) {
+        state = state.copyWith(eyeOpenSeen: true);
+        if (state.isBlinking) {
+          state = state.copyWith(
+              blinkDetected: true,
+              isBlinking: false,
+              eyeOpenSeen: false,
+              status: 'Matching Identity...');
+          _log.fine('Liveness (blink) passed.');
+        }
+      } else if (state.eyeOpenSeen &&
+          l < FaceThresholds.eyeClosed &&
+          r < FaceThresholds.eyeClosed) {
         state = state.copyWith(
             isBlinking: true, status: 'Blink to verify...');
-      } else if (state.isBlinking &&
-          l > FaceThresholds.eyeOpen &&
-          r > FaceThresholds.eyeOpen) {
-        state = state.copyWith(
-            blinkDetected: true,
-            isBlinking: false,
-            status: 'Matching Identity...');
-        _log.fine('Liveness (blink) passed.');
       }
       return;
     }
@@ -246,6 +269,7 @@ class VerificationController extends AutoDisposeNotifier<VerificationState> {
       showResult: false,
       blinkDetected: false,
       isBlinking: false,
+      eyeOpenSeen: false,
       isVerifying: false,
       clearMatchedUser: true,
       status: 'Scanning face...',
