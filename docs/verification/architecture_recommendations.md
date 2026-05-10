@@ -362,9 +362,17 @@ domain layer.
 
 | Column           | Type                              | Notes                                                                       |
 | ---------------- | --------------------------------- | --------------------------------------------------------------------------- |
-| `enrolledAt`     | `DateTimeColumn` (UTC)            | `withDefault(currentDateAndTime)`                                           |
+| `enrolledAt`     | `DateTimeColumn` **nullable**, `clientDefault(() => DateTime.now().toUtc())` | See note below; pre-v2 rows stay NULL ("unknown enrolment time"). |
 | `lastVerifiedAt` | `DateTimeColumn` nullable         | Set by `VerifyUser` use case on success                                     |
 | `templateMeta`   | `BlobColumn` nullable             | (Future) per-template provenance (model id, version) — additive, not v1    |
+
+> **Why `enrolledAt` is nullable, not `withDefault(currentDateAndTime)`.**
+> SQLite's `ALTER TABLE … ADD COLUMN` rejects non-constant defaults
+> (`CURRENT_TIMESTAMP` / `strftime('now')`), which we depend on for an
+> additive migration. Drift's `clientDefault` writes the timestamp at the
+> Dart boundary on every insert, so post-migration rows always have a
+> value; pre-v2 rows are left NULL and the Manage Users row should render
+> NULL as "Unknown" (MGR-002).
 
 **New `verification_logs` table:**
 
@@ -384,19 +392,39 @@ Index `(userId, at DESC)` for the "verifications today" aggregate.
 
 ```
 schemaVersion = 2
-onUpgrade(from, to) {
-  if (from < 2) {
-    await m.addColumn(users, users.enrolledAt);
-    await m.addColumn(users, users.lastVerifiedAt);
-    await m.addColumn(users, users.templateMeta);
-    await m.createTable(verificationLogs);
-  }
-}
+MigrationStrategy(
+  onCreate: (m) async {
+    await m.createAll();
+    await _createVerificationLogIndex(m);   // (user_id, at DESC)
+  },
+  onUpgrade: (m, from, to) async {
+    if (from < 2) {
+      await m.addColumn(users, users.enrolledAt);
+      await m.addColumn(users, users.lastVerifiedAt);
+      await m.addColumn(users, users.templateMeta);
+      await m.createTable(verificationLogs);
+      await _createVerificationLogIndex(m);
+    }
+  },
+  // SQLite has foreign keys OFF by default. We enable them on every open
+  // so that ON DELETE SET NULL on verification_logs.userId actually fires
+  // when a user row is deleted — required by MGR-009 / VER-DB-010.
+  beforeOpen: (details) async {
+    await customStatement('PRAGMA foreign_keys = ON');
+  },
+)
 ```
 
 **Hard rule** (per `05_database_migration.md`): no
 `fallbackToDestructiveMigration`. All future bumps must be additive, with a
 parity test that reads a v1 fixture DB and validates it upgrades cleanly.
+
+> **Why `beforeOpen: PRAGMA foreign_keys = ON` is part of the migration
+> strategy, not a one-off.** SQLite resets the `foreign_keys` pragma on
+> every new connection, so the only safe place to enable it is `beforeOpen`
+> (drift runs it before any DAO call sees the connection). Without it,
+> `ON DELETE SET NULL` on `verification_logs.userId` is a no-op and the
+> Manage-Users delete flow leaves dangling references.
 
 ### 5.3 Hive vs Isar vs SQLite — final recommendation table
 
