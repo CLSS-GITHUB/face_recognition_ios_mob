@@ -1,0 +1,179 @@
+import 'dart:typed_data';
+
+import '../../../../core/constants/thresholds.dart';
+import '../../../../core/error/failures.dart';
+import '../../../../services/face_matching_service.dart';
+import '../entities/verification_failure.dart';
+import '../entities/verification_log.dart';
+import '../entities/verify_decision.dart';
+import '../ports/embedding_extractor.dart';
+import '../ports/last_verified_sink.dart';
+import '../repositories/user_repository.dart';
+import '../repositories/verification_log_repository.dart';
+
+/// Orchestrates the *expensive*, once-per-attempt half of the Verify Identity
+/// pipeline. Cheap per-frame gates (detection, quality, occlusion, liveness,
+/// anti-replay) stay on the controller; this use case is invoked once a
+/// candidate frame has already passed those.
+///
+/// Inputs:
+///   - `rgb112`: pre-aligned, pre-resized 112×112 RGB byte buffer.
+///   - `templates`: the active flat-template bank pre-warmed by the
+///     controller on screen entry.
+///
+/// Output: a sealed [VerifyDecision] (granted or denied) with bookkeeping
+/// already persisted (verification log row + `lastVerifiedAt` on success).
+///
+/// See `docs/verification/architecture_recommendations.md` §2.4 / §3.5 for
+/// the surrounding pipeline.
+class VerifyUser {
+  VerifyUser({
+    required EmbeddingExtractor extractor,
+    required FaceMatchingService matcher,
+    required LastVerifiedSink userSink,
+    required VerificationLogRepository logRepo,
+    DateTime Function()? clock,
+  })  : _extractor = extractor,
+        _matcher = matcher,
+        _userSink = userSink,
+        _logRepo = logRepo,
+        _clock = clock ?? DateTime.now;
+
+  final EmbeddingExtractor _extractor;
+  final FaceMatchingService _matcher;
+  final LastVerifiedSink _userSink;
+  final VerificationLogRepository _logRepo;
+  final DateTime Function() _clock;
+
+  Future<VerifyDecision> call({
+    required Uint8List rgb112,
+    required FlatTemplates templates,
+  }) async {
+    final start = _clock();
+    final stopwatch = Stopwatch()..start();
+
+    // Empty bank short-circuit — skip the isolate call entirely. Cheaper
+    // and keeps the verification log clean of error rows when the user has
+    // simply not enrolled anyone.
+    if (templates.isEmpty) {
+      final latency = stopwatch.elapsedMilliseconds;
+      await _logRepo.append(
+        VerificationLog(
+          userId: null,
+          at: start,
+          outcome: VerificationOutcome.denied,
+          failureReason: VerificationFailure.noMatch.wireName,
+          bestSimilarity: null,
+          latencyMs: latency,
+        ),
+      );
+      return VerifyDenied(
+        reason: VerificationFailure.noMatch,
+        bestSimilarity: null,
+        latencyMs: latency,
+      );
+    }
+
+    final Float32List probe;
+    try {
+      probe = await _extractor.extract(rgb112);
+    } on EmbeddingFailedError {
+      // Worker reported a clean inference failure (bad bytes, NaN output).
+      return _logAndDeny(
+        start,
+        stopwatch,
+        VerificationOutcome.error,
+        VerificationFailure.extractionFailed,
+        bestSimilarity: null,
+      );
+    } on Object {
+      // Anything else (busy, isolate-unavailable, runtime exception) maps
+      // to a generic `error` outcome. The adapter that satisfies
+      // [EmbeddingExtractor] is expected to translate spawn / queue
+      // exceptions into [EmbeddingFailedError] when they should be tracked
+      // separately; otherwise we record the attempt and move on without
+      // crashing the controller.
+      return _logAndDeny(
+        start,
+        stopwatch,
+        VerificationOutcome.error,
+        VerificationFailure.error,
+        bestSimilarity: null,
+      );
+    }
+
+    // Ask the matcher for the raw best similarity, ignoring the verify
+    // threshold so we can record `bestSimilarity` even on a deny. The
+    // matcher returns `MatchResult.none()` when `count == 0` or `probe`
+    // length is wrong; both shouldn't happen here, but guard anyway.
+    final raw = _matcher.findBestMatch(
+      probe,
+      templates.flat,
+      templates.count,
+      threshold: -2.0,
+    );
+
+    if (!raw.isMatch) {
+      return _logAndDeny(
+        start,
+        stopwatch,
+        VerificationOutcome.denied,
+        VerificationFailure.noMatch,
+        bestSimilarity: null,
+      );
+    }
+
+    if (raw.similarity >= FaceThresholds.verifyThreshold) {
+      final user = templates.map[raw.index];
+      await _userSink.touchLastVerified(user.userId, start);
+      final latency = stopwatch.elapsedMilliseconds;
+      await _logRepo.append(
+        VerificationLog(
+          userId: user.userId,
+          at: start,
+          outcome: VerificationOutcome.granted,
+          bestSimilarity: raw.similarity,
+          latencyMs: latency,
+        ),
+      );
+      return VerifyGranted(
+        user: user,
+        similarity: raw.similarity,
+        latencyMs: latency,
+      );
+    }
+
+    return _logAndDeny(
+      start,
+      stopwatch,
+      VerificationOutcome.denied,
+      VerificationFailure.noMatch,
+      bestSimilarity: raw.similarity,
+    );
+  }
+
+  Future<VerifyDecision> _logAndDeny(
+    DateTime start,
+    Stopwatch stopwatch,
+    String outcome,
+    VerificationFailure reason, {
+    required double? bestSimilarity,
+  }) async {
+    final latency = stopwatch.elapsedMilliseconds;
+    await _logRepo.append(
+      VerificationLog(
+        userId: null,
+        at: start,
+        outcome: outcome,
+        failureReason: reason.wireName,
+        bestSimilarity: bestSimilarity,
+        latencyMs: latency,
+      ),
+    );
+    return VerifyDenied(
+      reason: reason,
+      bestSimilarity: bestSimilarity,
+      latencyMs: latency,
+    );
+  }
+}
