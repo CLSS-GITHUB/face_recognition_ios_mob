@@ -29,3 +29,17 @@ class EmbeddingFailedError extends FaceServiceError {
 class TFLiteUnavailableError extends FaceServiceError {
   const TFLiteUnavailableError() : super('TFLite interpreter unavailable');
 }
+
+/// Spawn or per-frame init of the embedding isolate failed (model load,
+/// XNNPack init, sandbox / platform restriction). The controller should
+/// fall back to inline TFLite — see architecture_recommendations.md §11.
+class EmbeddingIsolateUnavailableError extends FaceServiceError {
+  const EmbeddingIsolateUnavailableError(super.message);
+}
+
+/// `extract` was called while a previous extract is still in flight. The
+/// isolate's queue length is 1 (drop-newer-when-busy) — see §3.3.
+class EmbeddingBusyError extends FaceServiceError {
+  const EmbeddingBusyError()
+      : super('Embedding isolate is busy with a previous extract');
+}
