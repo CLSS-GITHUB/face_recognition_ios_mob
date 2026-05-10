@@ -55,5 +55,20 @@ void main() {
         ['BLINK', 'MOUTH_OPEN', 'TURN_LEFT', 'TURN_RIGHT', 'STILL'],
       );
     });
+
+    test('verify-flow constants (architecture §3.4)', () {
+      expect(FaceThresholds.verifyTimeoutMs, 12000);
+      expect(FaceThresholds.frameStaleMs, 1500);
+      expect(FaceThresholds.lowLightBrightness, 35);
+      expect(FaceThresholds.occlusionLandmarkMin, 4);
+      expect(FaceThresholds.eyeVisibleConsecutiveFrames, 2);
+      expect(FaceThresholds.replayMotionMaxStdPx, 0.8);
+      expect(FaceThresholds.replayMotionMinStdPx, 0.6);
+      expect(FaceThresholds.rateLimitMaxFailures, 5);
+      expect(FaceThresholds.rateLimitWindowMs, 60000);
+      expect(FaceThresholds.rateLimitCooldownMs, 30000);
+      expect(FaceThresholds.mouthOpenStepRequired, isFalse);
+      expect(FaceThresholds.verifyMaxAttemptsBeforeReset, 10);
+    });
   });
 }
