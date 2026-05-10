@@ -89,6 +89,8 @@ class UserRepositoryImpl implements UserRepository {
         faceTemplates: templates,
         isActive: row.isActive,
         imagePath: row.imagePath,
+        enrolledAt: row.enrolledAt,
+        lastVerifiedAt: row.lastVerifiedAt,
       );
     } catch (e, st) {
       _log.warning('Failed to decrypt templates for ${row.userId}', e, st);
@@ -98,6 +100,8 @@ class UserRepositoryImpl implements UserRepository {
         faceTemplates: const [],
         isActive: row.isActive,
         imagePath: row.imagePath,
+        enrolledAt: row.enrolledAt,
+        lastVerifiedAt: row.lastVerifiedAt,
       );
     }
   }
@@ -111,6 +115,15 @@ class UserRepositoryImpl implements UserRepository {
       faceTemplates: Value(encrypted),
       isActive: Value(user.isActive),
       imagePath: Value(user.imagePath),
+      // `enrolledAt` is left absent on insert so the table's clientDefault
+      // (DateTime.now().toUtc()) wins for new rows; an explicit value here
+      // would also be respected for fixture imports / re-enrolment.
+      enrolledAt: user.enrolledAt == null
+          ? const Value.absent()
+          : Value(user.enrolledAt),
+      lastVerifiedAt: user.lastVerifiedAt == null
+          ? const Value.absent()
+          : Value(user.lastVerifiedAt),
     );
   }
 }

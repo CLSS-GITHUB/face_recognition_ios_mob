@@ -35,4 +35,14 @@ class UserDao extends DatabaseAccessor<AppDatabase> with _$UserDaoMixin {
     return (update(users)..where((t) => t.userId.equals(userId)))
         .write(UsersCompanion(lastVerifiedAt: Value(when)));
   }
+
+  /// Updates only the `name` column. Wrapped in a transaction so the
+  /// encrypted `faceTemplates` blob is left untouched — see
+  /// architecture_recommendations.md §4.4.
+  Future<int> updateName(String userId, String name) {
+    return transaction(() async {
+      return (update(users)..where((t) => t.userId.equals(userId)))
+          .write(UsersCompanion(name: Value(name)));
+    });
+  }
 }
