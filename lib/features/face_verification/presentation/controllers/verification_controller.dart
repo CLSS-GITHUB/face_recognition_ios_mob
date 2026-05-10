@@ -19,7 +19,10 @@ import '../../domain/entities/face_data.dart';
 import '../../domain/entities/liveness_step.dart';
 import '../../domain/entities/quality_result.dart';
 import '../../domain/entities/user.dart';
+import '../../../../services/motion_variance_detector.dart';
+import '../../../../services/screen_reflection_detector.dart';
 import '../../domain/entities/verification_failure.dart';
+import '../../domain/entities/verification_log.dart';
 import '../../domain/entities/verify_decision.dart';
 import '../../domain/repositories/user_repository.dart';
 
@@ -121,6 +124,15 @@ class VerificationController extends AutoDisposeNotifier<VerificationState> {
 
   bool _disposed = false;
 
+  /// Anti-spoof: tracks face-bbox centroid over the last ~1s. A
+  /// frame-locked face means a printed photo / static screen — see §7.2.
+  final MotionVarianceDetector _motion = MotionVarianceDetector();
+
+  /// Anti-spoof: cheap saturation+luma heuristic on the 112×112 RGB crop
+  /// — phone-on-phone replay produces unnaturally vivid + bright pixels.
+  /// Stateless; see §7.3.
+  static const _screenReflection = ScreenReflectionDetector();
+
   @override
   VerificationState build() {
     ref.onDispose(() => _disposed = true);
@@ -197,6 +209,14 @@ class VerificationController extends AutoDisposeNotifier<VerificationState> {
     final face = faces.first;
     state = state.copyWith(faces: faces, frameSize: frameSize);
 
+    // Anti-spoof bookkeeping: feed every well-detected single face's bbox
+    // centroid into the motion-variance ring buffer so we can decide
+    // whether the frame is "alive" before we burn the embedding budget
+    // (architecture §7.2). The detector is cheap and stateful — even
+    // pre-blink frames count toward the rolling window so by the time
+    // we reach the match path we already have a verdict.
+    _motion.recordCentroid(face.boundingBox.center.dx, face.boundingBox.center.dy);
+
     final assessor = ref.read(qualityAssessorProvider);
     final quality = assessor.assess(face, frameSize,
         currentStep: state.blinkDetected ? null : LivenessStep.blink,
@@ -230,16 +250,39 @@ class VerificationController extends AutoDisposeNotifier<VerificationState> {
       return;
     }
 
+    // Anti-spoof gate (§7.2): if the bbox centroid hasn't moved across
+    // the rolling window, treat as a print/static-screen attack and short-
+    // circuit before the embedding step.
+    if (_motion.isStatic()) {
+      _log.warning('Spoof: motion variance below floor — denying.');
+      await _denyForSpoof();
+      return;
+    }
+
     await _runMatch(raw, face);
   }
 
   Future<void> _runMatch(CameraImage raw, FaceData face) async {
+    final attemptStart = DateTime.now();
+    final attemptStopwatch = Stopwatch()..start();
     state = state.copyWith(isVerifying: true, status: 'Matching Identity...');
     try {
       final rgb112 = _buildExtractorPayload(raw, face);
       if (rgb112 == null) {
         state = state.copyWith(
             isVerifying: false, status: 'Frame format unsupported');
+        return;
+      }
+
+      // Anti-spoof gate (§7.3): cheap saturation/luma check on the same
+      // crop the embedding extractor would consume. Phone-on-phone replay
+      // typically lights up here.
+      if (_screenReflection.isLikelyScreen(rgb112)) {
+        _log.warning('Spoof: screen reflection signal — denying.');
+        await _denyForSpoof(
+          start: attemptStart,
+          latencyMs: attemptStopwatch.elapsedMilliseconds,
+        );
         return;
       }
 
@@ -317,6 +360,9 @@ class VerificationController extends AutoDisposeNotifier<VerificationState> {
   }
 
   void dismissResult() {
+    // Anti-spoof: reset the motion buffer so a previous static-frame
+    // verdict doesn't leak into the next attempt's first second.
+    _motion.reset();
     state = state.copyWith(
       showResult: false,
       blinkDetected: false,
@@ -325,6 +371,48 @@ class VerificationController extends AutoDisposeNotifier<VerificationState> {
       isVerifying: false,
       clearMatchedUser: true,
       status: 'Scanning face...',
+    );
+  }
+
+  /// Spoof short-circuit: writes a `verification_logs` row, records a
+  /// rate-limit failure, and surfaces a denied result. Used by both anti-
+  /// spoof gates (motion variance and screen reflection). Mirrors what the
+  /// `VerifyDenied` branch in `_runMatch` does for `noMatch`/`spoof` from
+  /// the use case, so the UX is identical regardless of where the spoof
+  /// signal fires.
+  Future<void> _denyForSpoof({
+    DateTime? start,
+    int latencyMs = 0,
+  }) async {
+    final at = start ?? DateTime.now();
+    final logRepo = ref.read(verificationLogRepositoryProvider);
+    final rl = ref.read(rateLimiterProvider);
+
+    await logRepo.append(
+      VerificationLog(
+        userId: null,
+        at: at,
+        outcome: VerificationOutcome.spoof,
+        failureReason: VerificationFailure.spoof.wireName,
+        bestSimilarity: null,
+        latencyMs: latencyMs,
+      ),
+    );
+    await rl.recordFailure();
+    final post = await rl.check();
+    DateTime? cooldownUntil;
+    if (post is RateLimitCoolingDown) {
+      cooldownUntil = DateTime.now().add(post.retryAfter);
+    }
+    if (_disposed) return;
+    state = state.copyWith(
+      showResult: true,
+      isVerifying: false,
+      bestSimilarity: 0,
+      cooldownUntil: cooldownUntil,
+      status: cooldownUntil != null
+          ? 'Too many attempts'
+          : 'Spoof attempt detected',
     );
   }
 
