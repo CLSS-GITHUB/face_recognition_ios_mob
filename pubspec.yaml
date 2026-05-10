@@ -39,6 +39,9 @@ dependencies:
   flutter_secure_storage: ^9.2.2
   cryptography: ^2.7.0
 
+  # TTS for the granted-result announcement (architecture_recommendations §6.3).
+  flutter_tts: ^4.0.2
+
   # Logging
   logging: ^1.3.0
   logger: ^2.4.0

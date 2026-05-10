@@ -1,16 +1,26 @@
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
 import '../../data/database/app_database.dart';
+import '../../features/face_verification/data/adapters/dao_last_verified_sink.dart';
+import '../../features/face_verification/data/adapters/isolate_embedding_extractor.dart';
 import '../../features/face_verification/data/repositories/user_repository_impl.dart';
+import '../../features/face_verification/data/repositories/verification_log_repository_impl.dart';
+import '../../features/face_verification/domain/ports/embedding_extractor.dart';
+import '../../features/face_verification/domain/ports/last_verified_sink.dart';
 import '../../features/face_verification/domain/repositories/user_repository.dart';
+import '../../features/face_verification/domain/repositories/verification_log_repository.dart';
 import '../../features/face_verification/domain/usecases/enroll_user.dart';
+import '../../features/face_verification/domain/usecases/verify_user.dart';
 import '../../services/face_detection_service.dart';
 import '../../services/face_matching_service.dart';
 import '../../services/face_recognition_service.dart';
 import '../../services/liveness_state_machine.dart';
 import '../../services/quality_assessor.dart';
+import '../isolates/embedding_isolate.dart';
 import '../platform/permission_check.dart';
+import '../platform/rate_limiter.dart';
 import '../platform/security_check.dart';
+import '../platform/tts_announcer.dart';
 import '../security/template_crypto.dart';
 
 /// Application-lifetime database singleton.
@@ -62,6 +72,10 @@ final livenessStateMachineProvider =
 
 /// TFLite interpreter — one shared instance across screens. Closes on app
 /// teardown. Wrapped in a FutureProvider because asset load is async.
+///
+/// **Used only by the (legacy) inline match path.** New verify flow goes
+/// through [embeddingIsolateProvider] instead. Kept here while
+/// `EnrollmentController` still uses it.
 final faceRecognitionServiceProvider =
     FutureProvider<FaceRecognitionService>((ref) async {
   final s = await FaceRecognitionService.load();
@@ -84,4 +98,60 @@ final enrollUserUseCaseProvider = Provider<EnrollUser>((ref) {
   final repo = ref.watch(userRepositoryProvider);
   final matcher = ref.watch(faceMatchingServiceProvider);
   return EnrollUser(repo, matcher);
+});
+
+// ----------------------- Verify Identity wiring -----------------------------
+//
+// See docs/verification/architecture_recommendations.md §2.3.
+
+/// Long-lived TFLite isolate. `keepAlive` so the spawn cost (≈80 ms cold) is
+/// paid once per app process, not per screen.
+final embeddingIsolateProvider = FutureProvider<EmbeddingIsolate>((ref) async {
+  final iso = await EmbeddingIsolate.spawn();
+  ref.onDispose(iso.close);
+  return iso;
+});
+
+/// Adapts [EmbeddingIsolate] to the domain port. The adapter awaits the
+/// spawn future on each call — fast after the first.
+final embeddingExtractorProvider = Provider<EmbeddingExtractor>((ref) {
+  return IsolateEmbeddingExtractor(ref.watch(embeddingIsolateProvider.future));
+});
+
+/// Adapts the existing UserDao.touchLastVerified to the small domain port.
+final lastVerifiedSinkProvider = Provider<LastVerifiedSink>((ref) {
+  return DaoLastVerifiedSink(ref.watch(dbProvider).userDao);
+});
+
+final verificationLogRepositoryProvider =
+    Provider<VerificationLogRepository>((ref) {
+  return VerificationLogRepositoryImpl(
+    ref.watch(dbProvider).verificationLogDao,
+  );
+});
+
+/// Persistent rate limiter for verify attempts. Secure-storage backed so
+/// adversaries can't reset by clearing application documents.
+final secureStorageProvider = Provider<SecureKeyValueStore>((_) {
+  return FlutterSecureStorageAdapter();
+});
+
+final rateLimiterProvider = Provider<RateLimiter>((ref) {
+  return RateLimiter(storage: ref.watch(secureStorageProvider));
+});
+
+/// Spoken result. Best-effort — never throws on speak failures.
+final ttsAnnouncerProvider = Provider<TtsAnnouncer>((ref) {
+  final tts = FlutterTtsAnnouncer();
+  ref.onDispose(tts.dispose);
+  return tts;
+});
+
+final verifyUserUseCaseProvider = Provider<VerifyUser>((ref) {
+  return VerifyUser(
+    extractor: ref.watch(embeddingExtractorProvider),
+    matcher: ref.watch(faceMatchingServiceProvider),
+    userSink: ref.watch(lastVerifiedSinkProvider),
+    logRepo: ref.watch(verificationLogRepositoryProvider),
+  );
 });

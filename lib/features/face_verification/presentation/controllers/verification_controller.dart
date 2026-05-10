@@ -1,3 +1,4 @@
+import 'dart:async';
 import 'dart:io';
 import 'dart:typed_data';
 import 'dart:ui';
@@ -10,12 +11,16 @@ import 'package:logging/logging.dart';
 
 import '../../../../core/constants/thresholds.dart';
 import '../../../../core/di/providers.dart';
+import '../../../../core/platform/rate_limiter.dart';
 import '../../../../core/utils/bitmap_utils.dart';
 import '../../../../core/utils/camera_image_converter.dart';
+import '../../../../core/utils/image_processing.dart';
 import '../../domain/entities/face_data.dart';
 import '../../domain/entities/liveness_step.dart';
 import '../../domain/entities/quality_result.dart';
 import '../../domain/entities/user.dart';
+import '../../domain/entities/verification_failure.dart';
+import '../../domain/entities/verify_decision.dart';
 import '../../domain/repositories/user_repository.dart';
 
 class VerificationState {
@@ -33,6 +38,7 @@ class VerificationState {
     required this.flat,
     required this.isReady,
     required this.bestSimilarity,
+    required this.cooldownUntil,
   });
 
   const VerificationState.initial()
@@ -48,7 +54,8 @@ class VerificationState {
         eyeOpenSeen = false,
         flat = null,
         isReady = false,
-        bestSimilarity = 0;
+        bestSimilarity = 0,
+        cooldownUntil = null;
 
   final String status;
   final QualityResult? quality;
@@ -63,6 +70,11 @@ class VerificationState {
   final FlatTemplates? flat;
   final bool isReady;
   final double bestSimilarity;
+
+  /// When non-null and `> now()`, the rate limiter is forcing a cooldown
+  /// and the controller short-circuits each frame. Set after the
+  /// `rateLimitMaxFailures`th denial; cleared on dismissResult.
+  final DateTime? cooldownUntil;
 
   VerificationState copyWith({
     String? status,
@@ -80,6 +92,8 @@ class VerificationState {
     FlatTemplates? flat,
     bool? isReady,
     double? bestSimilarity,
+    DateTime? cooldownUntil,
+    bool clearCooldown = false,
   }) {
     return VerificationState(
       status: status ?? this.status,
@@ -96,6 +110,8 @@ class VerificationState {
       flat: flat ?? this.flat,
       isReady: isReady ?? this.isReady,
       bestSimilarity: bestSimilarity ?? this.bestSimilarity,
+      cooldownUntil:
+          clearCooldown ? null : (cooldownUntil ?? this.cooldownUntil),
     );
   }
 }
@@ -137,6 +153,14 @@ class VerificationController extends AutoDisposeNotifier<VerificationState> {
     // isVerifying has flipped back to false). The dialog stays open until
     // `dismissResult` is called, so until then we stop doing work.
     if (state.isVerifying || !state.isReady || state.showResult) return;
+
+    // Rate-limit cooldown: skip the entire pipeline (no detection, no ML).
+    final cd = state.cooldownUntil;
+    if (cd != null && DateTime.now().isBefore(cd)) {
+      final secs = cd.difference(DateTime.now()).inSeconds + 1;
+      state = state.copyWith(status: 'Too many attempts. Try again in ${secs}s.');
+      return;
+    }
 
     final detector = ref.read(faceDetectionServiceProvider);
     final faces = await detector.detect(forMlKit);
@@ -212,54 +236,78 @@ class VerificationController extends AutoDisposeNotifier<VerificationState> {
   Future<void> _runMatch(CameraImage raw, FaceData face) async {
     state = state.copyWith(isVerifying: true, status: 'Matching Identity...');
     try {
-      final image = _decodeFrame(raw);
-      if (image == null) {
+      final rgb112 = _buildExtractorPayload(raw, face);
+      if (rgb112 == null) {
         state = state.copyWith(
             isVerifying: false, status: 'Frame format unsupported');
         return;
       }
-      final crop = BitmapUtils.cropFace(image, face.boundingBox);
-      final recognizer =
-          await ref.read(faceRecognitionServiceProvider.future);
-      final probe = await recognizer.extractEmbedding(crop, face);
-      if (probe.isEmpty) {
-        state = state.copyWith(
-            isVerifying: false, status: 'Extraction failed. Try again.');
-        return;
-      }
 
-      final flat = state.flat;
-      if (flat == null || flat.isEmpty) {
-        _log.info('No active templates — denying.');
+      // Pre-flight rate-limit check: cheap secure-storage read; only
+      // happens once per attempt (after blink), not per frame.
+      final rl = ref.read(rateLimiterProvider);
+      final rlDecision = await rl.check();
+      if (rlDecision is RateLimitCoolingDown) {
+        final until = DateTime.now().add(rlDecision.retryAfter);
         state = state.copyWith(
-          showResult: true,
           isVerifying: false,
-          bestSimilarity: 0,
-          status: 'Match Failed',
+          showResult: true,
+          cooldownUntil: until,
+          status: 'Too many attempts',
         );
         return;
       }
 
-      final matcher = ref.read(faceMatchingServiceProvider);
-      final result = matcher.findBestMatch(probe, flat.flat, flat.count);
-      if (result.isMatch) {
-        final user = flat.map[result.index];
-        _log.info('MATCH FOUND (similarity: ${result.similarity})');
+      final useCase = ref.read(verifyUserUseCaseProvider);
+      final flat = state.flat ?? FlatTemplates(flat: _empty, map: const []);
+      final decision = await useCase.call(rgb112: rgb112, templates: flat);
+
+      if (_disposed) return;
+
+      if (decision is VerifyGranted) {
+        await rl.reset();
         state = state.copyWith(
-          matchedUser: user,
+          matchedUser: decision.user,
           showResult: true,
           isVerifying: false,
-          bestSimilarity: result.similarity,
+          bestSimilarity: decision.similarity,
           status: 'Verified!',
         );
-      } else {
-        _log.warning('NO MATCH (best: ${result.similarity})');
-        state = state.copyWith(
-          showResult: true,
-          isVerifying: false,
-          bestSimilarity: result.similarity < -1 ? 0 : result.similarity,
-          status: 'Match Failed',
+        // Best-effort spoken announcement; never throws.
+        unawaited(
+          ref
+              .read(ttsAnnouncerProvider)
+              .speak('Identity confirmed, ${decision.user.name}'),
         );
+      } else if (decision is VerifyDenied) {
+        // Only count "real" denies (no-match / spoof) against the rate
+        // limit. Infra errors don't burn the user's quota.
+        if (decision.reason == VerificationFailure.noMatch ||
+            decision.reason == VerificationFailure.spoof) {
+          await rl.recordFailure();
+          // Re-check to learn whether saturation just engaged.
+          final post = await rl.check();
+          DateTime? cooldownUntil;
+          if (post is RateLimitCoolingDown) {
+            cooldownUntil = DateTime.now().add(post.retryAfter);
+          }
+          state = state.copyWith(
+            showResult: true,
+            isVerifying: false,
+            bestSimilarity: decision.bestSimilarity ?? 0,
+            cooldownUntil: cooldownUntil,
+            status: cooldownUntil != null
+                ? 'Too many attempts'
+                : 'Match Failed',
+          );
+        } else {
+          state = state.copyWith(
+            showResult: true,
+            isVerifying: false,
+            bestSimilarity: decision.bestSimilarity ?? 0,
+            status: _statusForReason(decision.reason),
+          );
+        }
       }
     } catch (e, st) {
       _log.severe('Verification error', e, st);
@@ -281,6 +329,37 @@ class VerificationController extends AutoDisposeNotifier<VerificationState> {
   }
 
   // -------------------------------------------------------------- utils --
+
+  /// Decode → crop → align/enhance → resize 112×112 → flatten to RGB bytes.
+  /// Returns the 37,632-byte payload [EmbeddingExtractor] expects, or null
+  /// if the camera frame format is unsupported.
+  static Uint8List? _buildExtractorPayload(CameraImage raw, FaceData face) {
+    final image = _decodeFrame(raw);
+    if (image == null) return null;
+    final crop = BitmapUtils.cropFace(image, face.boundingBox);
+    final aligned = ImageProcessing.alignAndMaybeEnhance(crop, face);
+    final resized = img.copyResize(
+      aligned,
+      width: FaceThresholds.inputSize,
+      height: FaceThresholds.inputSize,
+      interpolation: img.Interpolation.linear,
+    );
+    return Uint8List.fromList(
+      resized.getBytes(order: img.ChannelOrder.rgb),
+    );
+  }
+
+  static String _statusForReason(VerificationFailure reason) {
+    return switch (reason) {
+      VerificationFailure.extractionFailed => 'Extraction failed. Try again.',
+      VerificationFailure.error => 'Verification Error',
+      VerificationFailure.noMatch => 'Match Failed',
+      VerificationFailure.spoof => 'Spoof attempt detected',
+      VerificationFailure.timeout => 'Verification timed out',
+      VerificationFailure.rateLimited => 'Too many attempts',
+      _ => 'Match Failed',
+    };
+  }
 
   static double _approximateBrightness(CameraImage raw) {
     if (raw.planes.isEmpty) return 128;
