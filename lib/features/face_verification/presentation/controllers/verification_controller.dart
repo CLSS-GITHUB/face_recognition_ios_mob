@@ -132,7 +132,11 @@ class VerificationController extends AutoDisposeNotifier<VerificationState> {
   static final Float32List _empty = Float32List(0);
 
   Future<void> processFrame(CameraImage raw, InputImage forMlKit) async {
-    if (state.isVerifying || !state.isReady) return;
+    // While a result dialog is up, every subsequent frame would otherwise
+    // fall straight through to `_runMatch` (blinkDetected is still true and
+    // isVerifying has flipped back to false). The dialog stays open until
+    // `dismissResult` is called, so until then we stop doing work.
+    if (state.isVerifying || !state.isReady || state.showResult) return;
 
     final detector = ref.read(faceDetectionServiceProvider);
     final faces = await detector.detect(forMlKit);
