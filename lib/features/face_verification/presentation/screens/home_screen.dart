@@ -1,14 +1,18 @@
+import 'dart:async';
+
 import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
+import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:go_router/go_router.dart';
 
+import '../../../../core/di/providers.dart';
 import '../widgets/action_card.dart';
 
-class HomeScreen extends StatelessWidget {
+class HomeScreen extends ConsumerWidget {
   const HomeScreen({super.key});
 
   @override
-  Widget build(BuildContext context) {
+  Widget build(BuildContext context, WidgetRef ref) {
     final scheme = Theme.of(context).colorScheme;
     return Scaffold(
       body: Container(
@@ -72,7 +76,16 @@ class HomeScreen extends StatelessWidget {
                   icon: Icons.face_rounded,
                   containerColor: scheme.secondaryContainer,
                   contentColor: scheme.onSecondaryContainer,
-                  onTap: () => context.push('/verify'),
+                  onTap: () {
+                    // Kick off camera + templates + isolate warm-up in
+                    // parallel with the route transition so the verify
+                    // screen's first frame lands sooner. Don't block the
+                    // push; failures are logged and recovered downstream.
+                    unawaited(
+                      ref.read(verifyPrewarmProvider.future),
+                    );
+                    context.push('/verify');
+                  },
                 ),
                 const SizedBox(height: 16),
                 ActionCard(

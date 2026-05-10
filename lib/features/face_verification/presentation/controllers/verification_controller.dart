@@ -133,11 +133,47 @@ class VerificationController extends AutoDisposeNotifier<VerificationState> {
   /// Stateless; see §7.3.
   static const _screenReflection = ScreenReflectionDetector();
 
+  /// Restarted on every frame; if it fires, the camera stream stalled
+  /// (architecture §3.2 step 2 / §3.4 frameStaleMs).
+  Timer? _staleFrameWatchdog;
+
   @override
   VerificationState build() {
-    ref.onDispose(() => _disposed = true);
+    ref.onDispose(() {
+      _disposed = true;
+      _staleFrameWatchdog?.cancel();
+      _staleFrameWatchdog = null;
+    });
     Future.microtask(_warmTemplates);
     return const VerificationState.initial();
+  }
+
+  /// Restarts the stale-frame timer. Called at the head of every
+  /// `processFrame` so a stuck stream eventually surfaces a soft warning
+  /// without taking down the screen.
+  void _bumpStaleFrameWatchdog() {
+    _staleFrameWatchdog?.cancel();
+    _staleFrameWatchdog = Timer(
+      const Duration(milliseconds: FaceThresholds.frameStaleMs),
+      _onStaleFrame,
+    );
+  }
+
+  void _onStaleFrame() {
+    if (_disposed) return;
+    // Don't trample a result dialog or an in-flight verify.
+    if (state.showResult || state.isVerifying) return;
+    _log.warning('Camera frame stalled for '
+        '${FaceThresholds.frameStaleMs} ms — soft reset.');
+    _motion.reset();
+    state = state.copyWith(
+      blinkDetected: false,
+      isBlinking: false,
+      eyeOpenSeen: false,
+      faces: const [],
+      clearQuality: true,
+      status: 'Camera stalled — moving back to scan.',
+    );
   }
 
   Future<void> _warmTemplates() async {
@@ -160,6 +196,11 @@ class VerificationController extends AutoDisposeNotifier<VerificationState> {
   static final Float32List _empty = Float32List(0);
 
   Future<void> processFrame(CameraImage raw, InputImage forMlKit) async {
+    // Restart the stale-frame timer regardless of where this frame
+    // short-circuits below — what we care about is "frames are arriving",
+    // not "frames are being fully processed".
+    _bumpStaleFrameWatchdog();
+
     // While a result dialog is up, every subsequent frame would otherwise
     // fall straight through to `_runMatch` (blinkDetected is still true and
     // isVerifying has flipped back to false). The dialog stays open until

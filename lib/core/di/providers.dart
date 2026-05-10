@@ -1,4 +1,6 @@
+import 'package:camera/camera.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
+import 'package:logging/logging.dart';
 
 import '../../data/database/app_database.dart';
 import '../../features/face_verification/data/adapters/dao_last_verified_sink.dart';
@@ -154,4 +156,53 @@ final verifyUserUseCaseProvider = Provider<VerifyUser>((ref) {
     userSink: ref.watch(lastVerifiedSinkProvider),
     logRepo: ref.watch(verificationLogRepositoryProvider),
   );
+});
+
+/// Pre-warms everything the Verify Identity screen needs so the first
+/// camera frame is visible quickly after the user taps "Verify Identity"
+/// (architecture §6.1: target ≤ 700 ms on Pixel 6).
+///
+/// Three tasks run in parallel:
+///   1. `availableCameras()` — caches the camera list inside the camera
+///      plugin so `CameraPreviewWidget._bootstrap` doesn't need to query
+///      the OS again.
+///   2. `userRepository.activeFlatTemplates()` — performs the per-row
+///      AES-GCM decrypt once; the controller's `_warmTemplates` will
+///      hit the now-warm in-memory bank cheaply.
+///   3. `embeddingIsolateProvider.future` — pays the ~80 ms isolate spawn
+///      cost (model load + Interpreter.fromBuffer) up-front.
+///
+/// `keepAlive` so calling it twice is idempotent: the home-screen tap
+/// fires it, and the verify screen re-reads it during boot — both resolve
+/// instantly the second time.
+///
+/// Failures are caught and logged: a prewarm hiccup must not block the
+/// route push; the verify screen will surface any real failure on its own
+/// through the existing error paths.
+final verifyPrewarmProvider = FutureProvider<void>((ref) async {
+  ref.keepAlive();
+  final log = Logger('VerifyPrewarm');
+  await Future.wait<void>([
+    () async {
+      try {
+        await availableCameras();
+      } catch (e, st) {
+        log.warning('availableCameras prewarm failed', e, st);
+      }
+    }(),
+    () async {
+      try {
+        await ref.read(userRepositoryProvider).activeFlatTemplates();
+      } catch (e, st) {
+        log.warning('templates prewarm failed', e, st);
+      }
+    }(),
+    () async {
+      try {
+        await ref.read(embeddingIsolateProvider.future);
+      } catch (e, st) {
+        log.warning('embedding isolate prewarm failed', e, st);
+      }
+    }(),
+  ]);
 });

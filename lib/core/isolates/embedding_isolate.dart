@@ -261,6 +261,14 @@ Future<void> _isolateMain(_SpawnArgs args) async {
     }
   }
 
+  // Pre-allocate the TFLite I/O buffers ONCE at isolate startup and
+  // reuse on every extract. The 1×112×112×3 nested-list input is ~150 KB
+  // of `double`s; rebuilding it per frame allocated ~6 ms / extract on a
+  // Pixel 6 (architecture §8). We overwrite the slots in-place inside
+  // `_runTfliteInto`.
+  final reusableInput = _allocInputBuffer();
+  final reusableOutput = _allocOutputBuffer();
+
   final inbox = ReceivePort();
   args.replyTo.send(inbox.sendPort);
 
@@ -283,7 +291,12 @@ Future<void> _isolateMain(_SpawnArgs args) async {
           final bytes = msg.bytes.materialize().asUint8List();
           Float32List result;
           if (args.config.useTflite) {
-            result = _runTflite(interpreter!, bytes);
+            result = _runTfliteInto(
+              interpreter!,
+              bytes,
+              reusableInput,
+              reusableOutput,
+            );
           } else {
             if (args.config.stubLatency > Duration.zero) {
               await Future<void>.delayed(args.config.stubLatency);
@@ -302,10 +315,10 @@ Future<void> _isolateMain(_SpawnArgs args) async {
   }
 }
 
-Float32List _runTflite(Interpreter interp, Uint8List rgb) {
+List<List<List<List<double>>>> _allocInputBuffer() {
   final n = FaceThresholds.inputSize;
-  // 1×N×N×3 nested-list input — the only shape tflite_flutter accepts.
-  final input = List<List<List<List<double>>>>.generate(
+  // 1×N×N×3 nested-list — the only shape tflite_flutter accepts.
+  return List<List<List<List<double>>>>.generate(
     1,
     (_) => List<List<List<double>>>.generate(
       n,
@@ -315,20 +328,40 @@ Float32List _runTflite(Interpreter interp, Uint8List rgb) {
       ),
     ),
   );
-  final mean = FaceThresholds.pixelMean;
-  var p = 0;
-  for (var y = 0; y < n; y++) {
-    for (var x = 0; x < n; x++) {
-      input[0][y][x][0] = (rgb[p++] - mean) / mean;
-      input[0][y][x][1] = (rgb[p++] - mean) / mean;
-      input[0][y][x][2] = (rgb[p++] - mean) / mean;
-    }
-  }
-  final output = List<List<double>>.generate(
+}
+
+List<List<double>> _allocOutputBuffer() {
+  return List<List<double>>.generate(
     1,
     (_) => List<double>.filled(FaceThresholds.embeddingDim, 0),
   );
+}
+
+/// In-place fill of [input] from `rgb`, run the interpreter into [output],
+/// then return the L2-normalised result. The caller owns both buffers and
+/// reuses them across extracts.
+Float32List _runTfliteInto(
+  Interpreter interp,
+  Uint8List rgb,
+  List<List<List<List<double>>>> input,
+  List<List<double>> output,
+) {
+  final n = FaceThresholds.inputSize;
+  final mean = FaceThresholds.pixelMean;
+  var p = 0;
+  for (var y = 0; y < n; y++) {
+    final row = input[0][y];
+    for (var x = 0; x < n; x++) {
+      final px = row[x];
+      px[0] = (rgb[p++] - mean) / mean;
+      px[1] = (rgb[p++] - mean) / mean;
+      px[2] = (rgb[p++] - mean) / mean;
+    }
+  }
   interp.run(input, output);
+  // The output list is reused; copy the bytes off into a fresh Float32List
+  // so the host receives an independent payload (the next extract would
+  // otherwise mutate the slot underneath it).
   return _l2(Float32List.fromList(output[0]));
 }
 
