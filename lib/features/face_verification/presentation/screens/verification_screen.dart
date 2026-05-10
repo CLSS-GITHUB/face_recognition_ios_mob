@@ -19,8 +19,7 @@ class VerificationScreen extends ConsumerStatefulWidget {
   const VerificationScreen({super.key});
 
   @override
-  ConsumerState<VerificationScreen> createState() =>
-      _VerificationScreenState();
+  ConsumerState<VerificationScreen> createState() => _VerificationScreenState();
 }
 
 class _VerificationScreenState extends ConsumerState<VerificationScreen> {
@@ -35,80 +34,97 @@ class _VerificationScreenState extends ConsumerState<VerificationScreen> {
 
     return Scaffold(
       backgroundColor: scheme.surface,
+      // LayoutBuilder + SingleChildScrollView + IntrinsicHeight: column fills
+      // the viewport when there's room (Spacer keeps Cancel pinned to bottom),
+      // and scrolls cleanly on small or landscape screens. Mirrors the same
+      // fix on live_enrollment_screen.dart — both screens share the
+      // 300×300 camera oval that overflows on heights ≲ 640 px.
       body: SafeArea(
-        child: Padding(
-          padding: const EdgeInsets.symmetric(horizontal: 24, vertical: 16),
-          child: Column(
-            crossAxisAlignment: CrossAxisAlignment.center,
-            children: [
-              Text(
-                'Verify Identity',
-                style: Theme.of(context).textTheme.headlineLarge?.copyWith(
-                      fontWeight: FontWeight.bold,
-                    ),
-              ),
-              const SizedBox(height: 32),
-              SizedBox(
-                width: 300,
-                height: 300,
-                child: Stack(
-                  alignment: Alignment.center,
-                  children: [
-                    _AlignmentRing(color: _ringColor(state)),
-                    SizedBox(
-                      width: 240,
-                      height: 240,
-                      child: ClipOval(
+        child: LayoutBuilder(
+          builder: (context, constraints) => SingleChildScrollView(
+            child: ConstrainedBox(
+              constraints: BoxConstraints(minHeight: constraints.maxHeight),
+              child: IntrinsicHeight(
+                child: Padding(
+                  padding: const EdgeInsets.symmetric(
+                    horizontal: 24,
+                    vertical: 16,
+                  ),
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.center,
+                    children: [
+                      Text(
+                        'Verify Identity',
+                        style: Theme.of(context).textTheme.headlineLarge
+                            ?.copyWith(fontWeight: FontWeight.bold),
+                      ),
+                      const SizedBox(height: 32),
+                      SizedBox(
+                        width: 300,
+                        height: 300,
                         child: Stack(
-                          fit: StackFit.expand,
+                          alignment: Alignment.center,
                           children: [
-                            CameraPreviewWidget(
-                              onFrame: (raw, input) => ref
-                                  .read(verificationControllerProvider
-                                      .notifier)
-                                  .processFrame(raw, input),
-                            ),
-                            FaceOverlay(
-                              faces: state.faces,
-                              frameSize: state.frameSize,
+                            _AlignmentRing(color: _ringColor(state)),
+                            SizedBox(
+                              width: 240,
+                              height: 240,
+                              child: ClipOval(
+                                child: Stack(
+                                  fit: StackFit.expand,
+                                  children: [
+                                    CameraPreviewWidget(
+                                      onFrame: (raw, input) => ref
+                                          .read(
+                                            verificationControllerProvider
+                                                .notifier,
+                                          )
+                                          .processFrame(raw, input),
+                                    ),
+                                    FaceOverlay(
+                                      faces: state.faces,
+                                      frameSize: state.frameSize,
+                                    ),
+                                  ],
+                                ),
+                              ),
                             ),
                           ],
                         ),
                       ),
-                    ),
-                  ],
-                ),
-              ),
-              const SizedBox(height: 24),
-              Text(
-                _bodyHint(state),
-                style: Theme.of(context).textTheme.bodyLarge?.copyWith(
-                      color: scheme.onSurfaceVariant,
-                    ),
-                textAlign: TextAlign.center,
-              ),
-              const SizedBox(height: 16),
-              InstructionCard(
-                step:
-                    state.blinkDetected ? null : LivenessStep.blink,
-                status: state.status,
-                quality: state.quality,
-              ),
-              const Spacer(),
-              SizedBox(
-                width: double.infinity,
-                height: 56,
-                child: FilledButton.tonal(
-                  onPressed: () => context.pop(),
-                  style: FilledButton.styleFrom(
-                    shape: RoundedRectangleBorder(
-                      borderRadius: BorderRadius.circular(16),
-                    ),
+                      const SizedBox(height: 24),
+                      Text(
+                        _bodyHint(state),
+                        style: Theme.of(context).textTheme.bodyLarge?.copyWith(
+                          color: scheme.onSurfaceVariant,
+                        ),
+                        textAlign: TextAlign.center,
+                      ),
+                      const SizedBox(height: 16),
+                      InstructionCard(
+                        step: state.blinkDetected ? null : LivenessStep.blink,
+                        status: state.status,
+                        quality: state.quality,
+                      ),
+                      const Spacer(),
+                      SizedBox(
+                        width: double.infinity,
+                        height: 56,
+                        child: FilledButton.tonal(
+                          onPressed: () => context.pop(),
+                          style: FilledButton.styleFrom(
+                            shape: RoundedRectangleBorder(
+                              borderRadius: BorderRadius.circular(16),
+                            ),
+                          ),
+                          child: const Text('Cancel'),
+                        ),
+                      ),
+                    ],
                   ),
-                  child: const Text('Cancel'),
                 ),
               ),
-            ],
+            ),
           ),
         ),
       ),
@@ -135,10 +151,7 @@ class _VerificationScreenState extends ConsumerState<VerificationScreen> {
     return 'Look at the camera, then blink to verify.';
   }
 
-  void _reactToState(
-    VerificationState? prev,
-    VerificationState next,
-  ) {
+  void _reactToState(VerificationState? prev, VerificationState next) {
     final justShownResult =
         (prev?.showResult ?? false) == false && next.showResult;
     if (!justShownResult || _resultDialogOpen) return;
@@ -154,9 +167,7 @@ class _VerificationScreenState extends ConsumerState<VerificationScreen> {
           onDismiss: () {
             Navigator.of(context).pop();
             _resultDialogOpen = false;
-            ref
-                .read(verificationControllerProvider.notifier)
-                .dismissResult();
+            ref.read(verificationControllerProvider.notifier).dismissResult();
           },
         ),
       );
