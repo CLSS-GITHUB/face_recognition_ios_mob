@@ -1,5 +1,4 @@
 import 'dart:async';
-import 'dart:io';
 import 'dart:math';
 import 'dart:typed_data';
 import 'dart:ui';
@@ -9,16 +8,14 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:google_mlkit_commons/google_mlkit_commons.dart';
 import 'package:google_mlkit_face_detection/google_mlkit_face_detection.dart'
     show FaceLandmarkType;
-import 'package:image/image.dart' as img;
 import 'package:logging/logging.dart';
 import 'package:sensors_plus/sensors_plus.dart';
 
 import '../../../../core/constants/thresholds.dart';
 import '../../../../core/di/providers.dart';
 import '../../../../core/platform/rate_limiter.dart';
-import '../../../../core/utils/bitmap_utils.dart';
 import '../../../../core/utils/blur_metric.dart';
-import '../../../../core/utils/camera_image_converter.dart';
+import '../../../../core/utils/frame_preparation.dart';
 import '../../domain/entities/face_data.dart';
 import '../../domain/entities/liveness_step.dart';
 import '../../domain/entities/quality_result.dart';
@@ -560,12 +557,40 @@ class VerificationController extends AutoDisposeNotifier<VerificationState> {
     final attemptStopwatch = Stopwatch()..start();
     state = state.copyWith(isVerifying: true, status: 'Matching Identity...');
     try {
-      final rgb112 = _buildExtractorPayload(raw, face);
-      if (rgb112 == null) {
+      final format = _rawFrameFormat(raw);
+      if (format == null) {
         state = state.copyWith(
             isVerifying: false, status: 'Frame format unsupported');
         return;
       }
+      // Phase D: decode + crop + eye-align + resize runs on the embedding
+      // isolate so the UI thread stays free to repaint the preview during
+      // a verify. Wall-clock latency is unchanged; the win is purely UI
+      // smoothness. The host-side gates below still run on the prepared
+      // 112×112 buffer so their status copy and error paths stay intact.
+      final leftEye = face.landmarks[FaceLandmarkType.leftEye];
+      final rightEye = face.landmarks[FaceLandmarkType.rightEye];
+      final extractor = ref.read(embeddingExtractorProvider);
+      late final Uint8List rgb112;
+      try {
+        rgb112 = await extractor.prepare(
+          rawBytes: raw.planes.first.bytes,
+          width: raw.width,
+          height: raw.height,
+          format: format,
+          bbox: face.boundingBox,
+          leftEyeX: leftEye?.x,
+          leftEyeY: leftEye?.y,
+          rightEyeX: rightEye?.x,
+          rightEyeY: rightEye?.y,
+        );
+      } catch (e, st) {
+        _log.warning('Frame preparation failed', e, st);
+        state = state.copyWith(
+            isVerifying: false, status: 'Frame format unsupported');
+        return;
+      }
+      if (_disposed) return;
 
       // Anti-spoof gate (§7.3): cheap saturation/luma check on the same
       // crop the embedding extractor would consume. Phone-on-phone replay
@@ -745,16 +770,20 @@ class VerificationController extends AutoDisposeNotifier<VerificationState> {
 
   // -------------------------------------------------------------- utils --
 
-  /// Decode → crop → align/enhance → resize 112×112 → flatten to RGB bytes.
-  /// Returns the 37,632-byte payload [EmbeddingExtractor] expects, or null
-  /// if the camera frame format is unsupported. The post-decode work is
-  /// shared with the enrolment controller via
-  /// [BitmapUtils.buildExtractorPayload] so a probe and a stored template
-  /// always go through identical preprocessing.
-  static Uint8List? _buildExtractorPayload(CameraImage raw, FaceData face) {
-    final image = _decodeFrame(raw);
-    if (image == null) return null;
-    return BitmapUtils.buildExtractorPayload(image, face);
+  /// Maps the active `CameraImage` plane format to the wire-level
+  /// [RawFrameFormat] understood by the embedding isolate's prepare
+  /// codepath. Returns `null` when neither Android NV21 nor iOS BGRA8888
+  /// is present — the caller surfaces that as "Frame format unsupported"
+  /// the same way the old [_buildExtractorPayload] null-return did.
+  static RawFrameFormat? _rawFrameFormat(CameraImage raw) {
+    switch (raw.format.group) {
+      case ImageFormatGroup.nv21:
+        return RawFrameFormat.nv21;
+      case ImageFormatGroup.bgra8888:
+        return RawFrameFormat.bgra8888;
+      default:
+        return null;
+    }
   }
 
   static String _statusForReason(VerificationFailure reason) {
@@ -783,27 +812,6 @@ class VerificationController extends AutoDisposeNotifier<VerificationState> {
     return count == 0 ? 128 : sum / count;
   }
 
-  static img.Image? _decodeFrame(CameraImage raw) {
-    if (Platform.isAndroid) {
-      if (raw.format.group != ImageFormatGroup.nv21) return null;
-      final rgb =
-          Nv21Decoder.nv21ToRgb(raw.planes.first.bytes, raw.width, raw.height);
-      return BitmapUtils.rgbBytesToImage(rgb, raw.width, raw.height);
-    }
-    if (Platform.isIOS) {
-      if (raw.format.group != ImageFormatGroup.bgra8888) return null;
-      final bgra = raw.planes.first.bytes;
-      final rgb = Uint8List(raw.width * raw.height * 3);
-      var di = 0;
-      for (var i = 0; i < bgra.length; i += 4) {
-        rgb[di++] = bgra[i + 2];
-        rgb[di++] = bgra[i + 1];
-        rgb[di++] = bgra[i];
-      }
-      return BitmapUtils.rgbBytesToImage(rgb, raw.width, raw.height);
-    }
-    return null;
-  }
 }
 
 final verificationControllerProvider =

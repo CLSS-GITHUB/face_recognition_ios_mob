@@ -1,11 +1,13 @@
 import 'dart:math';
 import 'dart:typed_data';
+import 'dart:ui' show Rect;
 
 import 'package:face_ios_android/core/constants/thresholds.dart';
 import 'package:face_ios_android/core/error/failures.dart';
 import 'package:face_ios_android/features/face_verification/domain/entities/user.dart';
 import 'package:face_ios_android/features/face_verification/domain/entities/verification_failure.dart';
 import 'package:face_ios_android/features/face_verification/domain/entities/verification_log.dart';
+import 'package:face_ios_android/core/utils/frame_preparation.dart';
 import 'package:face_ios_android/features/face_verification/domain/entities/verify_decision.dart';
 import 'package:face_ios_android/features/face_verification/domain/ports/embedding_extractor.dart';
 import 'package:face_ios_android/features/face_verification/domain/ports/last_verified_sink.dart';
@@ -68,6 +70,25 @@ class _FakeExtractor implements EmbeddingExtractor {
       throw err;
     }
     return _embedding!;
+  }
+
+  @override
+  Future<Uint8List> prepare({
+    required Uint8List rawBytes,
+    required int width,
+    required int height,
+    required RawFrameFormat format,
+    required Rect bbox,
+    int? leftEyeX,
+    int? leftEyeY,
+    int? rightEyeX,
+    int? rightEyeY,
+  }) async {
+    // VerifyUser never calls prepare — preparation is the controller's
+    // job. Unreachable from anything the use case tests exercise; if it
+    // ever does get hit, fail loudly instead of pretending success.
+    throw UnimplementedError(
+        '_FakeExtractor.prepare is not used by VerifyUser tests');
   }
 }
 

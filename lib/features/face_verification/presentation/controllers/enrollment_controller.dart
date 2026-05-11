@@ -5,6 +5,8 @@ import 'dart:ui';
 import 'package:camera/camera.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:google_mlkit_commons/google_mlkit_commons.dart';
+import 'package:google_mlkit_face_detection/google_mlkit_face_detection.dart'
+    show FaceLandmarkType;
 import 'package:image/image.dart' as img;
 import 'package:logging/logging.dart';
 import 'package:uuid/uuid.dart';
@@ -14,6 +16,7 @@ import '../../../../core/di/providers.dart';
 import '../../../../core/utils/bitmap_utils.dart';
 import '../../../../core/utils/blur_metric.dart';
 import '../../../../core/utils/camera_image_converter.dart';
+import '../../../../core/utils/frame_preparation.dart';
 import '../../domain/entities/enrollment_result.dart';
 import '../../domain/entities/enrollment_stage.dart';
 import '../../domain/entities/face_data.dart';
@@ -397,16 +400,40 @@ class EnrollmentController extends AutoDisposeNotifier<EnrollmentState> {
     state = state.copyWith(
         isProcessingFrame: true, verificationStatus: 'Verifying...');
     try {
-      final image = _decodeFrame(raw);
-      if (image == null) {
+      final format = _rawFrameFormat(raw);
+      if (format == null) {
         state = state.copyWith(
             isProcessingFrame: false,
             verificationStatus: 'Frame format unsupported');
         return;
       }
-      // Verify-after-enrol uses the same off-UI isolate path so the
-      // ~50 ms TFLite call no longer blocks the live preview.
-      final payload = BitmapUtils.buildExtractorPayload(image, face);
+      // Phase D: hand decode+crop+align+resize off to the embedding
+      // isolate so the camera preview stays smooth during the post-enrol
+      // verify blink. Identical preprocessing to the verify controller —
+      // both call the same FramePreparation inside the isolate.
+      final leftEye = face.landmarks[FaceLandmarkType.leftEye];
+      final rightEye = face.landmarks[FaceLandmarkType.rightEye];
+      final extractor = ref.read(embeddingExtractorProvider);
+      final Uint8List payload;
+      try {
+        payload = await extractor.prepare(
+          rawBytes: raw.planes.first.bytes,
+          width: raw.width,
+          height: raw.height,
+          format: format,
+          bbox: face.boundingBox,
+          leftEyeX: leftEye?.x,
+          leftEyeY: leftEye?.y,
+          rightEyeX: rightEye?.x,
+          rightEyeY: rightEye?.y,
+        );
+      } catch (e, st) {
+        _log.warning('Verify-stage prepare failed', e, st);
+        state = state.copyWith(
+            isProcessingFrame: false,
+            verificationStatus: 'Frame format unsupported');
+        return;
+      }
       // Same sharpness floor as the verify controller — a blurry verify
       // probe against a sharp enrolled template is the exact case the
       // gate was designed for.
@@ -422,7 +449,6 @@ class EnrollmentController extends AutoDisposeNotifier<EnrollmentState> {
             verificationStatus: 'Hold steady — frame is blurry');
         return;
       }
-      final extractor = ref.read(embeddingExtractorProvider);
       final verifyEmbedding = await extractor.extract(payload);
       if (verifyEmbedding.isEmpty) {
         state = state.copyWith(
@@ -515,6 +541,21 @@ class EnrollmentController extends AutoDisposeNotifier<EnrollmentState> {
       count++;
     }
     return count == 0 ? 128 : sum / count;
+  }
+
+  /// Maps the active `CameraImage` plane format to the wire-level
+  /// [RawFrameFormat] understood by the embedding isolate's prepare
+  /// codepath. Returns `null` when neither Android NV21 nor iOS BGRA8888
+  /// is present.
+  static RawFrameFormat? _rawFrameFormat(CameraImage raw) {
+    switch (raw.format.group) {
+      case ImageFormatGroup.nv21:
+        return RawFrameFormat.nv21;
+      case ImageFormatGroup.bgra8888:
+        return RawFrameFormat.bgra8888;
+      default:
+        return null;
+    }
   }
 
   static img.Image? _decodeFrame(CameraImage raw) {

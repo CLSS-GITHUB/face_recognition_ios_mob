@@ -1,6 +1,7 @@
 import 'dart:async';
 import 'dart:isolate';
 import 'dart:typed_data';
+import 'dart:ui' show Rect;
 
 import 'package:flutter/foundation.dart' show visibleForTesting;
 import 'package:flutter/services.dart' show rootBundle;
@@ -10,6 +11,7 @@ import 'package:tflite_flutter/tflite_flutter.dart';
 import '../constants/thresholds.dart';
 import '../error/failures.dart';
 import '../utils/embedding_sanity.dart';
+import '../utils/frame_preparation.dart';
 
 const String _modelAsset = 'assets/models/mobile_facenet.tflite';
 
@@ -49,7 +51,12 @@ class EmbeddingIsolate {
   final ReceivePort _responsePort;
   late final StreamSubscription<dynamic> _subscription;
 
-  Completer<Float32List>? _inFlight;
+  /// Single in-flight slot covering both `extract` (resolves to Float32List)
+  /// and `prepare` (resolves to Uint8List). The completer is typed `dynamic`
+  /// because the wire protocol dispatches on the worker's reply type — the
+  /// public methods above wrap this completer's future in a tightly-typed
+  /// `then` chain so callers never see a `dynamic`.
+  Completer<dynamic>? _inFlight;
   bool _closed = false;
 
   /// Production entry point: loads the bundled TFLite asset on the host
@@ -140,11 +147,63 @@ class EmbeddingIsolate {
         '${FaceThresholds.inputSize}), got ${rgb112.length}',
       );
     }
-    final completer = Completer<Float32List>();
+    final completer = Completer<dynamic>();
     _inFlight = completer;
     final transferable = TransferableTypedData.fromList(<Uint8List>[rgb112]);
     _workerPort.send(_ExtractRequest(transferable));
-    return completer.future;
+    return completer.future.then((v) => v as Float32List);
+  }
+
+  /// Submits a raw camera frame for the full prepare pipeline
+  /// (decode → crop → eye-axis align → resize → flatten) and returns the
+  /// 112×112 RGB payload. Phase D moved this off the UI thread to keep the
+  /// camera preview smooth during a verify.
+  ///
+  /// Single-flight against [extract] — the worker's queue length is 1, so
+  /// a `prepare` while an extract (or another prepare) is in flight throws
+  /// [EmbeddingBusyError].
+  Future<Uint8List> prepare({
+    required Uint8List rawBytes,
+    required int width,
+    required int height,
+    required RawFrameFormat format,
+    required Rect bbox,
+    int? leftEyeX,
+    int? leftEyeY,
+    int? rightEyeX,
+    int? rightEyeY,
+  }) {
+    if (_closed) {
+      throw StateError('EmbeddingIsolate is closed');
+    }
+    if (_inFlight != null) {
+      throw const EmbeddingBusyError();
+    }
+    if (rawBytes.isEmpty || width <= 0 || height <= 0) {
+      throw ArgumentError(
+        'prepare needs non-empty bytes and positive dimensions; '
+        'got bytes=${rawBytes.length}, ${width}x$height',
+      );
+    }
+    final completer = Completer<dynamic>();
+    _inFlight = completer;
+    final transferable =
+        TransferableTypedData.fromList(<Uint8List>[rawBytes]);
+    _workerPort.send(_PrepareRequest(
+      bytes: transferable,
+      width: width,
+      height: height,
+      formatIndex: format.index,
+      bboxLeft: bbox.left,
+      bboxTop: bbox.top,
+      bboxWidth: bbox.width,
+      bboxHeight: bbox.height,
+      leftEyeX: leftEyeX,
+      leftEyeY: leftEyeY,
+      rightEyeX: rightEyeX,
+      rightEyeY: rightEyeY,
+    ));
+    return completer.future.then((v) => v as Uint8List);
   }
 
   /// Disposes the worker. Pending extract (if any) errors with [StateError].
@@ -171,6 +230,12 @@ class EmbeddingIsolate {
     if (completer == null) return;
 
     if (message is Float32List) {
+      // extract reply.
+      completer.complete(message);
+    } else if (message is Uint8List) {
+      // prepare reply — must NOT be coerced into a Float32List view by
+      // accident; the caller has already declared the return type via
+      // `prepare(...).then((v) => v as Uint8List)`.
       completer.complete(message);
     } else if (message is _ExtractFailure) {
       completer.completeError(const EmbeddingFailedError(), message.stackTrace);
@@ -227,6 +292,35 @@ class _HelloMessage {
 class _ExtractRequest {
   const _ExtractRequest(this.bytes);
   final TransferableTypedData bytes;
+}
+
+class _PrepareRequest {
+  const _PrepareRequest({
+    required this.bytes,
+    required this.width,
+    required this.height,
+    required this.formatIndex,
+    required this.bboxLeft,
+    required this.bboxTop,
+    required this.bboxWidth,
+    required this.bboxHeight,
+    this.leftEyeX,
+    this.leftEyeY,
+    this.rightEyeX,
+    this.rightEyeY,
+  });
+  final TransferableTypedData bytes;
+  final int width;
+  final int height;
+  final int formatIndex;
+  final double bboxLeft;
+  final double bboxTop;
+  final double bboxWidth;
+  final double bboxHeight;
+  final int? leftEyeX;
+  final int? leftEyeY;
+  final int? rightEyeX;
+  final int? rightEyeY;
 }
 
 class _CloseMessage {
@@ -338,6 +432,43 @@ Future<void> _isolateMain(_SpawnArgs args) async {
             result = _stubEmbed(bytes);
           }
           host.send(result);
+        } catch (e, st) {
+          host.send(_ExtractFailure(e.toString(), st));
+        }
+      }
+      if (msg is _PrepareRequest && host != null) {
+        try {
+          if (args.config.stubLatency > Duration.zero) {
+            await Future<void>.delayed(args.config.stubLatency);
+          }
+          final raw = msg.bytes.materialize().asUint8List();
+          final format = RawFrameFormat.values[msg.formatIndex];
+          final prepared = FramePreparation.prepare(
+            rawBytes: raw,
+            width: msg.width,
+            height: msg.height,
+            format: format,
+            bbox: Rect.fromLTWH(
+              msg.bboxLeft,
+              msg.bboxTop,
+              msg.bboxWidth,
+              msg.bboxHeight,
+            ),
+            leftEyeX: msg.leftEyeX,
+            leftEyeY: msg.leftEyeY,
+            rightEyeX: msg.rightEyeX,
+            rightEyeY: msg.rightEyeY,
+          );
+          if (prepared == null) {
+            host.send(_ExtractFailure(
+              'FramePreparation.prepare returned null '
+              '(bytes=${raw.length}, ${msg.width}x${msg.height}, '
+              'format=${format.name})',
+              StackTrace.current,
+            ));
+          } else {
+            host.send(prepared);
+          }
         } catch (e, st) {
           host.send(_ExtractFailure(e.toString(), st));
         }
