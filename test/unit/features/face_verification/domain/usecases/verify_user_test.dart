@@ -1,3 +1,4 @@
+import 'dart:math';
 import 'dart:typed_data';
 
 import 'package:face_ios_android/core/constants/thresholds.dart';
@@ -21,7 +22,9 @@ Uint8List _frame() => Uint8List(_payloadBytes);
 
 /// Builds a flat-templates bank from a list of probes. Each user gets a
 /// single template equal to its corresponding probe (already L2-normalised
-/// in tests by construction).
+/// in tests by construction). Uses the [FlatTemplates.fromMap] factory so
+/// the parallel `userOf` / `uniqueUsers` indices required by the new
+/// open-set matcher are derived automatically.
 FlatTemplates _bank(List<(User, Float32List)> entries) {
   const dim = FaceThresholds.embeddingDim;
   final flat = Float32List(entries.length * dim);
@@ -30,7 +33,7 @@ FlatTemplates _bank(List<(User, Float32List)> entries) {
     flat.setRange(i * dim, (i + 1) * dim, entries[i].$2);
     map.add(entries[i].$1);
   }
-  return FlatTemplates(flat: flat, map: map);
+  return FlatTemplates.fromMap(flat: flat, map: map);
 }
 
 User _user(String id) => User(
@@ -195,6 +198,112 @@ void main() {
     expect((decision as VerifyGranted).user.userId, 'U2');
   });
 
+  test(
+      'multi-user margin: deny when two users are within `verifyUserMargin`',
+      () async {
+    // Construct a 3-user bank where the *correct* user (alice) has a
+    // template very close to a *wrong* user (bob). Both clear the
+    // 0.75 threshold, but their gap is below `verifyUserMargin`. The
+    // new open-set check must deny rather than grant the runner-up.
+    final alice = _user('U1');
+    final bob = _user('U2');
+    final carol = _user('U3');
+
+    Float32List along(double a, double b) {
+      // Build a 2-D probe in axes (0, 1) embedded into a 192-D space,
+      // then L2-normalise. Carol stays orthogonal so she never wins.
+      final v = Float32List(FaceThresholds.embeddingDim);
+      v[0] = a;
+      v[1] = b;
+      final n = sqrt(a * a + b * b);
+      if (n == 0) return v;
+      for (var i = 0; i < v.length; i++) {
+        v[i] /= n;
+      }
+      return v;
+    }
+
+    // alice ≈ (1, 0) and bob ≈ (cos15°, sin15°). probe ≈ (cos8°, sin8°).
+    // cosines: probe·alice = cos8° ≈ 0.990; probe·bob = cos7° ≈ 0.993.
+    // Both clear 0.75. The gap between them is ≈ 0.003 — well inside
+    // the 0.04 margin floor, so the use case must deny.
+    final aliceT = along(1.0, 0.0);
+    final bobT = along(0.966, 0.259); // ~15° from axis 0
+    final probe = along(0.990, 0.139); // ~8° from axis 0
+    final extractor = _FakeExtractor.returns(probe);
+
+    final useCase = VerifyUser(
+      extractor: extractor,
+      matcher: matcher,
+      userSink: sink,
+      logRepo: logRepo,
+    );
+    final bank = _bank(<(User, Float32List)>[
+      (alice, aliceT),
+      (bob, bobT),
+      (carol, _eFor(2)),
+    ]);
+
+    final decision = await useCase.call(rgb112: _frame(), templates: bank);
+
+    expect(decision, isA<VerifyDenied>(),
+        reason:
+            'Two enrolled users within verifyUserMargin should deny, not grant.');
+    final denied = decision as VerifyDenied;
+    expect(denied.reason, VerificationFailure.noMatch);
+    // The best similarity is still recorded for tuning telemetry.
+    expect(denied.bestSimilarity, isNotNull);
+    expect(denied.bestSimilarity!, greaterThan(FaceThresholds.verifyThreshold));
+    expect(sink.calls, isEmpty,
+        reason: 'No user should be touched when the margin gate denies.');
+  });
+
+  test(
+      'multi-user margin: grant when winner clears margin over runner-up',
+      () async {
+    // Same bank shape as the margin-deny test, but probe is shifted so
+    // alice wins by a wide margin (> verifyUserMargin = 0.04).
+    final alice = _user('U1');
+    final bob = _user('U2');
+    final carol = _user('U3');
+
+    Float32List along(double a, double b) {
+      final v = Float32List(FaceThresholds.embeddingDim);
+      v[0] = a;
+      v[1] = b;
+      final n = sqrt(a * a + b * b);
+      for (var i = 0; i < v.length; i++) {
+        v[i] /= n;
+      }
+      return v;
+    }
+
+    final aliceT = along(1.0, 0.0);
+    final bobT = along(0.5, 0.866); // ~60° from axis 0
+    final probe = along(0.985, 0.174); // ~10° from axis 0
+    // probe·alice = cos10° ≈ 0.985; probe·bob = cos50° ≈ 0.643.
+    // alice wins by ≈ 0.34 — way above the 0.04 margin.
+    final extractor = _FakeExtractor.returns(probe);
+
+    final useCase = VerifyUser(
+      extractor: extractor,
+      matcher: matcher,
+      userSink: sink,
+      logRepo: logRepo,
+    );
+    final bank = _bank(<(User, Float32List)>[
+      (alice, aliceT),
+      (bob, bobT),
+      (carol, _eFor(2)),
+    ]);
+
+    final decision = await useCase.call(rgb112: _frame(), templates: bank);
+
+    expect(decision, isA<VerifyGranted>());
+    expect((decision as VerifyGranted).user.userId, 'U1');
+    expect(decision.similarity, greaterThan(FaceThresholds.verifyThreshold));
+  });
+
   test('empty bank: skip extract and log denied with noMatch', () async {
     final extractor = _FakeExtractor.returns(_eFor(0));
     final useCase = VerifyUser(
@@ -206,7 +315,7 @@ void main() {
 
     final decision = await useCase.call(
       rgb112: _frame(),
-      templates: FlatTemplates(flat: _emptyF32, map: const <User>[]),
+      templates: FlatTemplates.empty,
     );
 
     expect(decision, isA<VerifyDenied>());
@@ -283,5 +392,3 @@ void main() {
     expect(denied.latencyMs, greaterThanOrEqualTo(0));
   });
 }
-
-final Float32List _emptyF32 = Float32List(0);

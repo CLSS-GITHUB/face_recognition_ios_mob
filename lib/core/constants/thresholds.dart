@@ -36,6 +36,20 @@ class FaceThresholds {
   static const double duplicateFaceThreshold = 0.85;
   static const double templateDedupThreshold = 0.95;
 
+  /// Open-set safety margin: the *best* enrolled user's similarity must
+  /// beat the *runner-up* enrolled user's similarity by at least this
+  /// much before we grant. Prevents identity confusion when ≥ 3 users
+  /// are enrolled and one unrelated user happens to land in the noisy
+  /// 0.75–0.85 cosine band against the live probe (the gap between
+  /// `verifyThreshold` and `duplicateFaceThreshold`). Calibrated against
+  /// the MobileFaceNet 192-D embedding; do not weaken below 0.03.
+  static const double verifyUserMargin = 0.04;
+
+  /// Per-user upper bound on the number of templates scanned during
+  /// matching. Newest templates win on overflow. Bounds the O(N·M·D)
+  /// linear scan cost so latency stays flat as a user re-enrols.
+  static const int maxTemplatesPerUserMatched = 8;
+
   // Retry
   static const int extractionRetryLimit = 150;
 

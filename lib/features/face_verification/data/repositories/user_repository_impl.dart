@@ -61,20 +61,65 @@ class UserRepositoryImpl implements UserRepository {
   Future<FlatTemplates> activeFlatTemplates() async {
     final users = await getActive();
     const dim = FaceThresholds.embeddingDim;
-    final total = users.fold<int>(0, (acc, u) => acc + u.faceTemplates.length);
+    const perUserCap = FaceThresholds.maxTemplatesPerUserMatched;
+
+    // First pass: count only valid templates (right-sized) and cap per
+    // user. Newer templates win on overflow — they are at the tail of
+    // the list (EnrollUser appends). Counting first avoids the buffer
+    // over-allocation the previous implementation had when any stored
+    // template was the wrong length.
+    var total = 0;
+    final perUserUsed = <int>[];
+    for (final u in users) {
+      var c = 0;
+      // Iterate in reverse so we keep the newest `perUserCap` templates
+      // when a user has been re-enrolled many times.
+      for (var i = u.faceTemplates.length - 1; i >= 0 && c < perUserCap; i--) {
+        if (u.faceTemplates[i].length == dim) c++;
+      }
+      perUserUsed.add(c);
+      total += c;
+    }
+
+    if (total == 0) {
+      // No usable templates — return the canonical empty bank so the
+      // controller / use case can short-circuit cleanly without
+      // allocating a zero-length buffer per pre-warm.
+      return FlatTemplates.empty;
+    }
+
     final flat = Float32List(total * dim);
     final map = <User>[];
+    final userOf = Int32List(total);
+    final uniqueUsers = <User>[];
     var off = 0;
-    for (final u in users) {
-      for (final t in u.faceTemplates) {
-        if (t.length == dim) {
-          flat.setRange(off, off + dim, t);
-          off += dim;
-          map.add(u);
-        }
+    var slot = 0;
+
+    for (var ui = 0; ui < users.length; ui++) {
+      final u = users[ui];
+      final budget = perUserUsed[ui];
+      if (budget == 0) continue;
+      uniqueUsers.add(u);
+      final uIndex = uniqueUsers.length - 1;
+      var c = 0;
+      for (var i = u.faceTemplates.length - 1; i >= 0 && c < budget; i--) {
+        final t = u.faceTemplates[i];
+        if (t.length != dim) continue;
+        flat.setRange(off, off + dim, t);
+        map.add(u);
+        userOf[slot] = uIndex;
+        off += dim;
+        slot++;
+        c++;
       }
     }
-    return FlatTemplates(flat: flat, map: map);
+
+    return FlatTemplates(
+      flat: flat,
+      map: map,
+      userOf: userOf,
+      uniqueUsers: uniqueUsers,
+    );
   }
 
   // --- mapping ----------------------------------------------------------

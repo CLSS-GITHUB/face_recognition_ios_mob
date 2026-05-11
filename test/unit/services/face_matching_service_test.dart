@@ -72,4 +72,68 @@ void main() {
     final result = matcher.findBestMatch(probe, Float32List(0), 0);
     expect(result.isMatch, isFalse);
   });
+
+  test('findBestUser groups by user and reports runner-up', () {
+    // alice owns two templates (axis 0 and axis 1); bob owns one
+    // template (axis 2). Probe lies along axis 1 — best is alice
+    // (cos = 1 via her second template), runner-up is bob (cos = 0).
+    final probe = _unit(dim, 1);
+    final flat = Float32List(3 * dim)
+      ..setRange(0 * dim, 1 * dim, _unit(dim, 0))
+      ..setRange(1 * dim, 2 * dim, _unit(dim, 1))
+      ..setRange(2 * dim, 3 * dim, _unit(dim, 2));
+    final userOf = Int32List.fromList(<int>[0, 0, 1]);
+
+    final result = matcher.findBestUser(
+      probe,
+      flat,
+      userOf,
+      3,
+      uniqueUserCount: 2,
+    );
+
+    expect(result.hasResult, isTrue);
+    expect(result.userIndex, 0, reason: 'alice (unique index 0) should win');
+    expect(result.bestSimilarity, closeTo(1.0, 1e-6));
+    expect(result.runnerUpSimilarity, closeTo(0.0, 1e-6));
+    expect(result.margin, closeTo(1.0, 1e-6));
+  });
+
+  test('findBestUser single-user → runner-up = -1.0 (closed-set fallback)',
+      () {
+    final probe = _unit(dim, 0);
+    final flat = Float32List(dim)..setRange(0, dim, _unit(dim, 0));
+    final userOf = Int32List.fromList(<int>[0]);
+
+    final result = matcher.findBestUser(
+      probe,
+      flat,
+      userOf,
+      1,
+      uniqueUserCount: 1,
+    );
+
+    expect(result.bestSimilarity, closeTo(1.0, 1e-6));
+    expect(result.runnerUpSimilarity, -1.0,
+        reason: 'Single-user banks must use the closed-set runner-up.');
+    expect(result.margin, closeTo(2.0, 1e-6));
+  });
+
+  test('findBestUser returns none on empty / malformed bank', () {
+    expect(
+      matcher
+          .findBestUser(_unit(dim, 0), Float32List(0), Int32List(0), 0,
+              uniqueUserCount: 0)
+          .hasResult,
+      isFalse,
+    );
+    expect(
+      matcher
+          .findBestUser(_unit(dim, 0), Float32List(dim), Int32List(0), 1,
+              uniqueUserCount: 1)
+          .hasResult,
+      isFalse,
+      reason: 'userOf shorter than count → none, no crash',
+    );
+  });
 }

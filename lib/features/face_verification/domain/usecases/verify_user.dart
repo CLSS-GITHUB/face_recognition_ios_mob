@@ -24,6 +24,15 @@ import '../repositories/verification_log_repository.dart';
 /// Output: a sealed [VerifyDecision] (granted or denied) with bookkeeping
 /// already persisted (verification log row + `lastVerifiedAt` on success).
 ///
+/// Open-set safety:
+///   The matcher returns the *best user's* best similarity AND the
+///   runner-up user's best similarity. We grant only when **both**
+///   (a) the best similarity clears `verifyThreshold` AND
+///   (b) the gap between best and runner-up clears `verifyUserMargin`.
+///   This prevents identity confusion in deployments with ≥ 3 enrolled
+///   users where an unrelated face can sometimes land in the noisy
+///   0.75–0.85 cosine band against the live probe.
+///
 /// See `docs/verification/architecture_recommendations.md` §2.4 / §3.5 for
 /// the surrounding pipeline.
 class VerifyUser {
@@ -102,18 +111,19 @@ class VerifyUser {
       );
     }
 
-    // Ask the matcher for the raw best similarity, ignoring the verify
-    // threshold so we can record `bestSimilarity` even on a deny. The
-    // matcher returns `MatchResult.none()` when `count == 0` or `probe`
-    // length is wrong; both shouldn't happen here, but guard anyway.
-    final raw = _matcher.findBestMatch(
+    // Per-user best-similarity scan. The matcher groups all templates
+    // by their owning user before picking a winner so the runner-up gap
+    // (margin) is computed across *users*, not templates of the same
+    // user. This is what makes multi-user identification reliable.
+    final result = _matcher.findBestUser(
       probe,
       templates.flat,
+      templates.userOf,
       templates.count,
-      threshold: -2.0,
+      uniqueUserCount: templates.uniqueUserCount,
     );
 
-    if (!raw.isMatch) {
+    if (!result.hasResult) {
       return _logAndDeny(
         start,
         stopwatch,
@@ -123,8 +133,13 @@ class VerifyUser {
       );
     }
 
-    if (raw.similarity >= FaceThresholds.verifyThreshold) {
-      final user = templates.map[raw.index];
+    final best = result.bestSimilarity;
+    final margin = result.margin;
+    final clearsThreshold = best >= FaceThresholds.verifyThreshold;
+    final clearsMargin = margin >= FaceThresholds.verifyUserMargin;
+
+    if (clearsThreshold && clearsMargin) {
+      final user = templates.uniqueUsers[result.userIndex];
       await _userSink.touchLastVerified(user.userId, start);
       final latency = stopwatch.elapsedMilliseconds;
       await _logRepo.append(
@@ -132,23 +147,26 @@ class VerifyUser {
           userId: user.userId,
           at: start,
           outcome: VerificationOutcome.granted,
-          bestSimilarity: raw.similarity,
+          bestSimilarity: best,
           latencyMs: latency,
         ),
       );
       return VerifyGranted(
         user: user,
-        similarity: raw.similarity,
+        similarity: best,
         latencyMs: latency,
       );
     }
 
+    // Either the best similarity fell short OR a runner-up user is too
+    // close — both surface as `noMatch` to the user. We still record
+    // the `best` so threshold/margin tuning has data to learn from.
     return _logAndDeny(
       start,
       stopwatch,
       VerificationOutcome.denied,
       VerificationFailure.noMatch,
-      bestSimilarity: raw.similarity,
+      bestSimilarity: best,
     );
   }
 

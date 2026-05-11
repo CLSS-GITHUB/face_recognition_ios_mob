@@ -14,6 +14,13 @@ import '../widgets/instruction_card.dart';
 /// circular camera oval, instruction card, cancel CTA) but drives the
 /// verification controller's FSM instead of the enrolment one.
 ///
+/// UI states the user sees, in order:
+///   1. `!isReady`       → spinner + "Loading enrolled users…".
+///   2. No face / poor   → red alignment ring + quality hint.
+///   3. Quality ok       → amber ring + "Blink to verify".
+///   4. Blink detected   → green ring + spinner overlay + "Matching…".
+///   5. Result           → modal dialog, ring frozen until dismissed.
+///
 /// See `docs/verification/architecture_recommendations.md` §6.
 class VerificationScreen extends ConsumerStatefulWidget {
   const VerificationScreen({super.key});
@@ -85,6 +92,57 @@ class _VerificationScreenState extends ConsumerState<VerificationScreen> {
                                       faces: state.faces,
                                       frameSize: state.frameSize,
                                     ),
+                                    // Matching-in-progress overlay. Dimmed
+                                    // backdrop + spinner appears the moment
+                                    // the controller flips `isVerifying`
+                                    // (after blink). Animated so it fades
+                                    // in/out without flicker between
+                                    // back-to-back frames.
+                                    AnimatedOpacity(
+                                      duration:
+                                          const Duration(milliseconds: 150),
+                                      opacity: state.isVerifying ? 1.0 : 0.0,
+                                      child: IgnorePointer(
+                                        ignoring: !state.isVerifying,
+                                        child: const ColoredBox(
+                                          color: Color(0x66000000),
+                                          child: Center(
+                                            child: SizedBox(
+                                              width: 56,
+                                              height: 56,
+                                              child:
+                                                  CircularProgressIndicator(
+                                                strokeWidth: 4,
+                                                valueColor:
+                                                    AlwaysStoppedAnimation(
+                                                        Colors.white),
+                                              ),
+                                            ),
+                                          ),
+                                        ),
+                                      ),
+                                    ),
+                                    // Pre-warm overlay. Shown until the
+                                    // template bank is loaded and decrypted.
+                                    // Without this, the user sees a green
+                                    // camera oval but no feedback that the
+                                    // app is still bootstrapping.
+                                    if (!state.isReady)
+                                      const ColoredBox(
+                                        color: Color(0xAA000000),
+                                        child: Center(
+                                          child: SizedBox(
+                                            width: 40,
+                                            height: 40,
+                                            child: CircularProgressIndicator(
+                                              strokeWidth: 3,
+                                              valueColor:
+                                                  AlwaysStoppedAnimation(
+                                                      Colors.white),
+                                            ),
+                                          ),
+                                        ),
+                                      ),
                                   ],
                                 ),
                               ),
@@ -135,6 +193,9 @@ class _VerificationScreenState extends ConsumerState<VerificationScreen> {
   /// red = no face / poor quality, amber = quality ok / awaiting blink,
   /// green = matching / matched.
   Color _ringColor(VerificationState state) {
+    // While the bank is still being decrypted, render the ring inactive
+    // (neutral grey) — green or amber here would suggest the pipeline is
+    // ready when it actually isn't, leading users to blink too early.
     if (!state.isReady) return AppColors.progressInactive;
     if (state.faces.length != 1) return Colors.red;
     final qualityOk = state.quality?.isGood ?? false;
@@ -143,11 +204,17 @@ class _VerificationScreenState extends ConsumerState<VerificationScreen> {
     return AppColors.success;
   }
 
+  /// Short, user-facing description of the current step. Kept terse —
+  /// the InstructionCard below this row carries the detailed message.
   String _bodyHint(VerificationState state) {
     if (!state.isReady) return 'Loading enrolled users…';
     if (state.matchedUser != null) return 'Identity confirmed.';
     if (state.isVerifying) return 'Matching against enrolled users…';
     if (state.blinkDetected) return 'Hold still while we verify.';
+    if (state.faces.isEmpty) return 'Position your face inside the oval.';
+    if (state.faces.length > 1) {
+      return 'Only one face at a time, please.';
+    }
     return 'Look at the camera, then blink to verify.';
   }
 

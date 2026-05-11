@@ -183,17 +183,26 @@ class VerificationController extends AutoDisposeNotifier<VerificationState> {
       if (_disposed) return;
       state = state.copyWith(flat: flat, isReady: true);
       _log.fine('Pre-warmed ${flat.count} templates from '
-          '${flat.map.toSet().length} users');
+          '${flat.uniqueUserCount} unique users');
     } catch (e, st) {
       _log.severe('Failed to pre-warm templates', e, st);
       state = state.copyWith(
-          isReady: true,
-          status: 'Database unavailable',
-          flat: FlatTemplates(flat: _empty, map: const []));
+        isReady: true,
+        status: 'Database unavailable',
+        flat: FlatTemplates.empty,
+      );
     }
   }
 
-  static final Float32List _empty = Float32List(0);
+  /// Public re-warm hook. The verify screen invokes this whenever the
+  /// user lands back on it from enrollment / management routes so a
+  /// newly enrolled or deleted user shows up immediately — otherwise the
+  /// flat bank set on `build()` is stale until the controller auto-
+  /// disposes.
+  Future<void> refreshTemplates() async {
+    if (_disposed) return;
+    await _warmTemplates();
+  }
 
   Future<void> processFrame(CameraImage raw, InputImage forMlKit) async {
     // Restart the stale-frame timer regardless of where this frame
@@ -343,7 +352,7 @@ class VerificationController extends AutoDisposeNotifier<VerificationState> {
       }
 
       final useCase = ref.read(verifyUserUseCaseProvider);
-      final flat = state.flat ?? FlatTemplates(flat: _empty, map: const []);
+      final flat = state.flat ?? FlatTemplates.empty;
       final decision = await useCase.call(rgb112: rgb112, templates: flat);
 
       if (_disposed) return;
@@ -413,6 +422,10 @@ class VerificationController extends AutoDisposeNotifier<VerificationState> {
       clearMatchedUser: true,
       status: 'Scanning face...',
     );
+    // Pick up any enroll / delete that happened while the result dialog
+    // was up. `_warmTemplates` is a single encrypted-row scan; cheap
+    // enough to run on every dismissal even when nothing changed.
+    unawaited(_warmTemplates());
   }
 
   /// Spoof short-circuit: writes a `verification_logs` row, records a
