@@ -225,7 +225,22 @@ class VerificationController extends AutoDisposeNotifier<VerificationState> {
     }
 
     final detector = ref.read(faceDetectionServiceProvider);
-    final faces = await detector.detect(forMlKit);
+    // ML Kit's detector occasionally hangs or throws on a malformed
+    // frame (driver glitches, rotation/format mismatches after a hot
+    // restart). Wrap with a hard timeout + catch so a single bad
+    // frame degrades to "no face detected" instead of bubbling into
+    // the camera plugin's microtask and silently freezing the FSM
+    // (matches the enrollment controller's guard).
+    List<FaceData> faces;
+    try {
+      faces = await detector.detect(forMlKit).timeout(
+        const Duration(seconds: 3),
+        onTimeout: () => const <FaceData>[],
+      );
+    } catch (e, st) {
+      _log.warning('Face detection threw — treating as no face', e, st);
+      faces = const <FaceData>[];
+    }
     if (_disposed) return;
     final rawFrameSize = forMlKit.metadata?.size ?? Size.zero;
     // ML Kit returns bbox in rotated coords; match frame dims so centering

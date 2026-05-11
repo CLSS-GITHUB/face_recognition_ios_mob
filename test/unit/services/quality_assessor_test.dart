@@ -78,7 +78,11 @@ void main() {
   });
 
   test('rejects extreme yaw outside movement steps', () {
-    final r = assessor.assess(_face(yaw: 30), frame,
+    // yawLimit = 35°; use a value clearly above it. The Kotlin baseline
+    // used a 25° limit, which is why this test originally expected 30°
+    // to trip — the Dart port relaxed the limit to 35° to match real
+    // ML Kit yaw noise on front cameras.
+    final r = assessor.assess(_face(yaw: 40), frame,
         currentStep: LivenessStep.still, brightness: 150);
     expect(r.issues, contains('Look straight ahead'));
   });
