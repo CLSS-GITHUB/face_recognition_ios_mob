@@ -1,7 +1,5 @@
 import 'dart:async';
 
-import 'package:flutter_test/flutter_test.dart';
-
 /// Test config picked up by `flutter_test` for any test under `test/`.
 ///
 /// Goldens are compared against `test/golden/goldens/` files generated on

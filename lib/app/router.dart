@@ -39,38 +39,38 @@ final routerProvider = Provider<GoRouter>((ref) {
       return null;
     },
     routes: [
-      GoRoute(path: '/', builder: (_, __) => const SplashScreen()),
+      GoRoute(path: '/', builder: (_, _) => const SplashScreen()),
       GoRoute(
         path: '/security',
-        builder: (_, __) => const SecurityWarningScreen(),
+        builder: (_, _) => const SecurityWarningScreen(),
       ),
       GoRoute(
         path: '/permission',
-        builder: (_, __) => const PermissionScreen(),
+        builder: (_, _) => const PermissionScreen(),
       ),
-      GoRoute(path: '/home', builder: (_, __) => const HomeScreen()),
+      GoRoute(path: '/home', builder: (_, _) => const HomeScreen()),
       GoRoute(
         path: '/enroll',
-        builder: (_, __) => const EnrollFormScreen(),
+        builder: (_, _) => const EnrollFormScreen(),
         routes: [
           GoRoute(
             path: 'live',
-            builder: (_, __) => const LiveEnrollmentScreen(),
+            builder: (_, _) => const LiveEnrollmentScreen(),
           ),
         ],
       ),
       GoRoute(
         path: '/verify',
-        builder: (_, __) => const VerificationScreen(),
+        builder: (_, _) => const VerificationScreen(),
       ),
       GoRoute(
         path: '/manage',
-        builder: (_, __) => const UserManagementScreen(),
+        builder: (_, _) => const UserManagementScreen(),
       ),
       if (kDebugMode)
         GoRoute(
           path: '/debug',
-          builder: (_, __) => const DebugCameraScreen(),
+          builder: (_, _) => const DebugCameraScreen(),
         ),
     ],
   );

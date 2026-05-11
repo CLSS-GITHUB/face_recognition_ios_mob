@@ -10,7 +10,7 @@ import '../constants/thresholds.dart';
 
 /// Pure-Dart port of BitmapUtils.kt:
 /// - cropFace with 25% margin
-/// - saveJpeg into <appDocs>/user_faces/
+/// - saveJpeg into `<appDocs>/user_faces/`
 class BitmapUtils {
   BitmapUtils._();
 
@@ -31,7 +31,7 @@ class BitmapUtils {
   }
 
   /// Encodes the bitmap as JPEG (quality matching Android) and saves to
-  /// <appDocs>/user_faces/<fileName>.jpg. Returns the absolute path.
+  /// `<appDocs>/user_faces/<fileName>.jpg`. Returns the absolute path.
   static Future<String> saveJpeg(img.Image bitmap, String fileName) async {
     final dir = await getApplicationDocumentsDirectory();
     final faces = Directory(p.join(dir.path, 'user_faces'));

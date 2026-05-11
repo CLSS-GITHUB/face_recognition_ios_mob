@@ -89,11 +89,15 @@ class FaceRecognitionService {
 
   static Float32List _l2Normalize(Float32List v) {
     var sumSq = 0.0;
-    for (var i = 0; i < v.length; i++) sumSq += v[i] * v[i];
+    for (var i = 0; i < v.length; i++) {
+      sumSq += v[i] * v[i];
+    }
     final norm = sqrt(sumSq);
     if (norm < 1e-6) return v;
     final out = Float32List(v.length);
-    for (var i = 0; i < v.length; i++) out[i] = v[i] / norm;
+    for (var i = 0; i < v.length; i++) {
+      out[i] = v[i] / norm;
+    }
     return out;
   }
 }
