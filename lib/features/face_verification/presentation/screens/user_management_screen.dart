@@ -86,6 +86,15 @@ class _UserRow extends ConsumerWidget {
                           ),
                     ),
                   ),
+                  // Amber re-enrol pill — only present when the user's
+                  // stored templates were produced by a different face-
+                  // recognition model than the bundled one. Tap the row
+                  // to open the detail sheet, which surfaces the
+                  // explanation + primary Re-enroll CTA.
+                  if (user.requiresReEnroll) ...[
+                    const _ReEnrollPill(),
+                    const SizedBox(width: 6),
+                  ],
                   _StatusPill(active: user.isActive),
                   Switch.adaptive(
                     value: user.isActive,
@@ -225,6 +234,47 @@ class _StatusPill extends StatelessWidget {
       child: Text(
         active ? 'Active' : 'Inactive',
         style: TextStyle(color: fg, fontWeight: FontWeight.w600, fontSize: 12),
+      ),
+    );
+  }
+}
+
+/// Amber "Re-enroll" badge. Rendered next to [_StatusPill] when a user's
+/// stored templates were produced by a model other than the one currently
+/// bundled (see `User.requiresReEnroll`). Tapping the row opens the
+/// detail sheet, which carries the explanation and the primary CTA.
+class _ReEnrollPill extends StatelessWidget {
+  const _ReEnrollPill();
+
+  static const _bg = Color(0xFFFFF3E0); // amber-50
+  static const _fg = Color(0xFFB7570B); // amber-900-ish
+
+  @override
+  Widget build(BuildContext context) {
+    return Semantics(
+      label: 'Re-enrolment required',
+      container: true,
+      child: Container(
+        padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 2),
+        decoration: BoxDecoration(
+          color: _bg,
+          borderRadius: BorderRadius.circular(12),
+        ),
+        child: const Row(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            Icon(Icons.warning_amber_rounded, size: 14, color: _fg),
+            SizedBox(width: 4),
+            Text(
+              'Re-enroll',
+              style: TextStyle(
+                color: _fg,
+                fontWeight: FontWeight.w600,
+                fontSize: 12,
+              ),
+            ),
+          ],
+        ),
       ),
     );
   }

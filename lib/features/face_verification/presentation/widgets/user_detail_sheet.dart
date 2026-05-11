@@ -76,6 +76,7 @@ class _UserDetailSheetState extends State<UserDetailSheet> {
   Widget build(BuildContext context) {
     final scheme = Theme.of(context).colorScheme;
     final templateCount = widget.user.faceTemplates.length;
+    final requiresReEnroll = widget.user.requiresReEnroll;
 
     return SafeArea(
       child: Padding(
@@ -106,6 +107,15 @@ class _UserDetailSheetState extends State<UserDetailSheet> {
                     color: scheme.onSurfaceVariant,
                   ),
             ),
+            // Explanation banner shown only when this user's templates
+            // belong to a previous face-recognition model. The matcher
+            // already excludes them, so the user cannot verify until they
+            // re-enrol — surface that here so the action below is the
+            // obvious next step instead of looking like a routine option.
+            if (requiresReEnroll) ...[
+              const SizedBox(height: 12),
+              const _ReEnrollBanner(),
+            ],
             const SizedBox(height: 16),
             TextField(
               controller: _nameController,
@@ -130,28 +140,58 @@ class _UserDetailSheetState extends State<UserDetailSheet> {
                   ),
             ),
             const SizedBox(height: 16),
-            Row(
-              children: [
-                Expanded(
-                  child: OutlinedButton.icon(
-                    onPressed: widget.onReEnroll,
-                    icon: const Icon(Icons.refresh),
-                    label: const Text('Re-enroll'),
-                  ),
+            // When this user requires re-enrolment, promote that CTA to
+            // a full-width FilledButton (the primary action). In the
+            // normal case keep the two outlined buttons side-by-side.
+            if (requiresReEnroll)
+              SizedBox(
+                width: double.infinity,
+                height: 52,
+                child: FilledButton.icon(
+                  onPressed: widget.onReEnroll,
+                  icon: const Icon(Icons.refresh),
+                  label: const Text('Re-enroll now'),
                 ),
-                const SizedBox(width: 12),
-                Expanded(
-                  child: OutlinedButton.icon(
-                    onPressed: widget.onDelete,
-                    icon: Icon(Icons.delete_outline,
-                        color: scheme.error),
-                    label: Text('Delete',
-                        style: TextStyle(color: scheme.error)),
+              )
+            else
+              Row(
+                children: [
+                  Expanded(
+                    child: OutlinedButton.icon(
+                      onPressed: widget.onReEnroll,
+                      icon: const Icon(Icons.refresh),
+                      label: const Text('Re-enroll'),
+                    ),
                   ),
-                ),
-              ],
-            ),
+                  const SizedBox(width: 12),
+                  Expanded(
+                    child: OutlinedButton.icon(
+                      onPressed: widget.onDelete,
+                      icon: Icon(Icons.delete_outline, color: scheme.error),
+                      label: Text(
+                        'Delete',
+                        style: TextStyle(color: scheme.error),
+                      ),
+                    ),
+                  ),
+                ],
+              ),
             const SizedBox(height: 12),
+            // Stale-version users still need a Delete affordance, but it
+            // moves to a less-prominent text button so re-enrol stays
+            // the primary action.
+            if (requiresReEnroll)
+              SizedBox(
+                width: double.infinity,
+                child: TextButton.icon(
+                  onPressed: widget.onDelete,
+                  icon: Icon(Icons.delete_outline, color: scheme.error),
+                  label: Text(
+                    'Delete instead',
+                    style: TextStyle(color: scheme.error),
+                  ),
+                ),
+              ),
             SizedBox(
               width: double.infinity,
               height: 52,
@@ -164,6 +204,48 @@ class _UserDetailSheetState extends State<UserDetailSheet> {
             ),
           ],
         ),
+      ),
+    );
+  }
+}
+
+/// Amber explanation banner shown at the top of [UserDetailSheet] when
+/// the user's stored templates were produced by a previous face-
+/// recognition model. The matcher already excludes them, so a verify
+/// attempt would always fail until the user is re-enrolled — this banner
+/// makes that the obvious next action.
+class _ReEnrollBanner extends StatelessWidget {
+  const _ReEnrollBanner();
+
+  static const _bg = Color(0xFFFFF3E0);
+  static const _border = Color(0xFFFFCC80);
+  static const _fg = Color(0xFF7A4100);
+
+  @override
+  Widget build(BuildContext context) {
+    return Container(
+      padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 10),
+      decoration: BoxDecoration(
+        color: _bg,
+        border: Border.all(color: _border),
+        borderRadius: BorderRadius.circular(8),
+      ),
+      child: Row(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          const Icon(Icons.warning_amber_rounded, color: _fg, size: 20),
+          const SizedBox(width: 10),
+          Expanded(
+            child: Text(
+              'This user was enrolled with a previous face model. '
+              'They cannot verify until you re-enroll them.',
+              style: Theme.of(context).textTheme.bodyMedium?.copyWith(
+                    color: _fg,
+                    height: 1.3,
+                  ),
+            ),
+          ),
+        ],
       ),
     );
   }
