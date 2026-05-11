@@ -160,7 +160,14 @@ class _VerificationScreenState extends ConsumerState<VerificationScreen> {
                       ),
                       const SizedBox(height: 16),
                       InstructionCard(
-                        step: state.blinkDetected ? null : LivenessStep.blink,
+                        // Show the active challenge until it's been
+                        // performed, then drop the headline so the
+                        // status line ("Matching Identity…") takes
+                        // over. Same pattern as the previous
+                        // blink-only flow.
+                        step: state.livenessPassed
+                            ? null
+                            : state.challenge,
                         status: state.status,
                         quality: state.quality,
                       ),
@@ -190,32 +197,43 @@ class _VerificationScreenState extends ConsumerState<VerificationScreen> {
   }
 
   /// Ring colour mirrors architecture_recommendations.md §6.2:
-  /// red = no face / poor quality, amber = quality ok / awaiting blink,
-  /// green = matching / matched.
+  /// red = no face / poor quality, amber = quality ok / awaiting the
+  /// challenge motion, green = matching / matched.
   Color _ringColor(VerificationState state) {
     // While the bank is still being decrypted, render the ring inactive
     // (neutral grey) — green or amber here would suggest the pipeline is
-    // ready when it actually isn't, leading users to blink too early.
+    // ready when it actually isn't, leading users to act too early.
     if (!state.isReady) return AppColors.progressInactive;
     if (state.faces.length != 1) return Colors.red;
     final qualityOk = state.quality?.isGood ?? false;
     if (!qualityOk) return Colors.red;
-    if (!state.blinkDetected) return Colors.amber;
+    if (!state.livenessPassed) return Colors.amber;
     return AppColors.success;
   }
 
   /// Short, user-facing description of the current step. Kept terse —
   /// the InstructionCard below this row carries the detailed message.
+  /// The body hint changes per random challenge so the user always
+  /// reads the right prompt for *this* attempt's required motion.
   String _bodyHint(VerificationState state) {
     if (!state.isReady) return 'Loading enrolled users…';
     if (state.matchedUser != null) return 'Identity confirmed.';
     if (state.isVerifying) return 'Matching against enrolled users…';
-    if (state.blinkDetected) return 'Hold still while we verify.';
+    if (state.livenessPassed) return 'Hold still while we verify.';
     if (state.faces.isEmpty) return 'Position your face inside the oval.';
     if (state.faces.length > 1) {
       return 'Only one face at a time, please.';
     }
-    return 'Look at the camera, then blink to verify.';
+    return switch (state.challenge) {
+      LivenessStep.blink => 'Look at the camera, then blink to verify.',
+      LivenessStep.mouthOpen =>
+          'Look at the camera, then open and close your mouth.',
+      LivenessStep.turnLeft =>
+          'Turn your head to the left, then face the camera again.',
+      LivenessStep.turnRight =>
+          'Turn your head to the right, then face the camera again.',
+      LivenessStep.still => 'Hold still and face the camera.',
+    };
   }
 
   void _reactToState(VerificationState? prev, VerificationState next) {

@@ -1,11 +1,14 @@
 import 'dart:async';
 import 'dart:io';
+import 'dart:math';
 import 'dart:typed_data';
 import 'dart:ui';
 
 import 'package:camera/camera.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:google_mlkit_commons/google_mlkit_commons.dart';
+import 'package:google_mlkit_face_detection/google_mlkit_face_detection.dart'
+    show FaceLandmarkType;
 import 'package:image/image.dart' as img;
 import 'package:logging/logging.dart';
 
@@ -34,7 +37,8 @@ class VerificationState {
     required this.isVerifying,
     required this.matchedUser,
     required this.showResult,
-    required this.blinkDetected,
+    required this.challenge,
+    required this.livenessPassed,
     required this.isBlinking,
     required this.eyeOpenSeen,
     required this.flat,
@@ -43,15 +47,16 @@ class VerificationState {
     required this.cooldownUntil,
   });
 
-  const VerificationState.initial()
-      : status = 'Scanning face...',
+  const VerificationState.initial({
+    this.challenge = LivenessStep.blink,
+  })  : status = 'Scanning face...',
         quality = null,
         faces = const [],
         frameSize = Size.zero,
         isVerifying = false,
         matchedUser = null,
         showResult = false,
-        blinkDetected = false,
+        livenessPassed = false,
         isBlinking = false,
         eyeOpenSeen = false,
         flat = null,
@@ -66,7 +71,21 @@ class VerificationState {
   final bool isVerifying;
   final User? matchedUser;
   final bool showResult;
-  final bool blinkDetected;
+
+  /// Liveness challenge the user must perform this attempt. Picked once
+  /// per attempt from [verifyChallengeOptions] using `Random.secure` —
+  /// a single replay video can satisfy at most one option, so a 4-way
+  /// pick forces the attacker to record (and successfully present) the
+  /// right behaviour at the right moment.
+  final LivenessStep challenge;
+
+  /// True once the active [challenge] has been performed. Replaces the
+  /// previous `blinkDetected` flag, which only described one of four
+  /// possible challenges.
+  final bool livenessPassed;
+
+  /// Transient state used by the BLINK challenge handler only. Other
+  /// challenges keep their progress on the controller's private fields.
   final bool isBlinking;
   final bool eyeOpenSeen;
   final FlatTemplates? flat;
@@ -88,7 +107,8 @@ class VerificationState {
     User? matchedUser,
     bool clearMatchedUser = false,
     bool? showResult,
-    bool? blinkDetected,
+    LivenessStep? challenge,
+    bool? livenessPassed,
     bool? isBlinking,
     bool? eyeOpenSeen,
     FlatTemplates? flat,
@@ -106,7 +126,8 @@ class VerificationState {
       matchedUser:
           clearMatchedUser ? null : (matchedUser ?? this.matchedUser),
       showResult: showResult ?? this.showResult,
-      blinkDetected: blinkDetected ?? this.blinkDetected,
+      challenge: challenge ?? this.challenge,
+      livenessPassed: livenessPassed ?? this.livenessPassed,
       isBlinking: isBlinking ?? this.isBlinking,
       eyeOpenSeen: eyeOpenSeen ?? this.eyeOpenSeen,
       flat: flat ?? this.flat,
@@ -136,6 +157,21 @@ class VerificationController extends AutoDisposeNotifier<VerificationState> {
   /// (architecture §3.2 step 2 / §3.4 frameStaleMs).
   Timer? _staleFrameWatchdog;
 
+  /// Cryptographically-strong RNG used to pick the per-attempt
+  /// liveness challenge. A predictable RNG would let an attacker
+  /// pre-record a clip matching the next pick.
+  final Random _challengeRng = Random.secure();
+
+  /// Transient state for the MOUTH_OPEN challenge: the mouth was
+  /// observed open (ratio > mouthOpenEnter); now waiting for it to
+  /// close (ratio < mouthCloseExit) before advancing.
+  bool _mouthOpened = false;
+
+  /// Transient state for TURN_LEFT / TURN_RIGHT challenges: the
+  /// required yaw peak was observed; now waiting for the head to
+  /// return near centre before advancing into the match phase.
+  bool _turnReached = false;
+
   @override
   VerificationState build() {
     ref.onDispose(() {
@@ -144,7 +180,17 @@ class VerificationController extends AutoDisposeNotifier<VerificationState> {
       _staleFrameWatchdog = null;
     });
     Future.microtask(_warmTemplates);
-    return const VerificationState.initial();
+    return VerificationState.initial(challenge: _pickChallenge());
+  }
+
+  /// Uniformly samples one challenge from [verifyChallengeOptions]
+  /// using `Random.secure`. Called on screen entry and after every
+  /// result dismissal so a replay attacker cannot anticipate the next
+  /// pick from prior screens.
+  LivenessStep _pickChallenge() {
+    return verifyChallengeOptions[
+      _challengeRng.nextInt(verifyChallengeOptions.length)
+    ];
   }
 
   /// Restarts the stale-frame timer. Called at the head of every
@@ -165,14 +211,23 @@ class VerificationController extends AutoDisposeNotifier<VerificationState> {
     _log.warning('Camera frame stalled for '
         '${FaceThresholds.frameStaleMs} ms — soft reset.');
     _motion.reset();
+    _resetChallengeProgress();
     state = state.copyWith(
-      blinkDetected: false,
+      livenessPassed: false,
       isBlinking: false,
       eyeOpenSeen: false,
       faces: const [],
       clearQuality: true,
       status: 'Camera stalled — moving back to scan.',
     );
+  }
+
+  /// Clear controller-side challenge progress (mouth + turn). The
+  /// blink-side transient state lives in [VerificationState] and is
+  /// reset there by the caller in the same `copyWith`.
+  void _resetChallengeProgress() {
+    _mouthOpened = false;
+    _turnReached = false;
   }
 
   Future<void> _warmTemplates() async {
@@ -286,35 +341,19 @@ class VerificationController extends AutoDisposeNotifier<VerificationState> {
     _motion.recordCentroid(face.boundingBox.center.dx, face.boundingBox.center.dy);
 
     final assessor = ref.read(qualityAssessorProvider);
+    // Pass the active challenge so the assessor relaxes the right gates:
+    // turnLeft/turnRight tolerate off-axis poses, blink tolerates a
+    // missing eye-open probability on the closed frame, etc. Once
+    // liveness has passed we fall back to the strictest "facing forward"
+    // gates for the match-time embedding extraction.
     final quality = assessor.assess(face, frameSize,
-        currentStep: state.blinkDetected ? null : LivenessStep.blink,
+        currentStep: state.livenessPassed ? null : state.challenge,
         brightness: brightness);
     state = state.copyWith(quality: quality);
     if (!quality.isGood) return;
 
-    if (!state.blinkDetected) {
-      final lRaw = face.leftEyeOpen;
-      final rRaw = face.rightEyeOpen;
-
-      final l = lRaw ?? (state.eyeOpenSeen ? 0.0 : 1.0);
-      final r = rRaw ?? (state.eyeOpenSeen ? 0.0 : 1.0);
-
-      if (l > FaceThresholds.eyeOpen && r > FaceThresholds.eyeOpen) {
-        state = state.copyWith(eyeOpenSeen: true);
-        if (state.isBlinking) {
-          state = state.copyWith(
-              blinkDetected: true,
-              isBlinking: false,
-              eyeOpenSeen: false,
-              status: 'Matching Identity...');
-          _log.fine('Liveness (blink) passed.');
-        }
-      } else if (state.eyeOpenSeen &&
-          l < FaceThresholds.eyeClosed &&
-          r < FaceThresholds.eyeClosed) {
-        state = state.copyWith(
-            isBlinking: true, status: 'Blink to verify...');
-      }
+    if (!state.livenessPassed) {
+      _handleChallenge(face);
       return;
     }
 
@@ -328,6 +367,138 @@ class VerificationController extends AutoDisposeNotifier<VerificationState> {
     }
 
     await _runMatch(raw, face);
+  }
+
+  /// Dispatches per-attempt liveness detection to the handler matching
+  /// the randomised challenge. Each handler updates `state.livenessPassed`
+  /// when its motion has been observed. Returning without setting
+  /// `livenessPassed=true` means "keep watching" — the next frame will
+  /// re-enter through this same path.
+  void _handleChallenge(FaceData face) {
+    switch (state.challenge) {
+      case LivenessStep.blink:
+        _handleBlink(face);
+      case LivenessStep.mouthOpen:
+        _handleMouthOpen(face);
+      case LivenessStep.turnLeft:
+        _handleTurn(face, leftward: true);
+      case LivenessStep.turnRight:
+        _handleTurn(face, leftward: false);
+      case LivenessStep.still:
+        // `still` is intentionally excluded from verifyChallengeOptions
+        // (a static photo trivially passes it). Defensive default: treat
+        // a single good-quality frame as sufficient. Reached only if a
+        // future code change adds `still` to the option set.
+        state = state.copyWith(
+          livenessPassed: true,
+          status: 'Matching Identity...',
+        );
+    }
+  }
+
+  /// BLINK: open → closed → open. The leading "open" frame is required
+  /// (matches the FSM contract) so a user arriving with closed eyes
+  /// can't advance on the next open frame.
+  void _handleBlink(FaceData face) {
+    final lRaw = face.leftEyeOpen;
+    final rRaw = face.rightEyeOpen;
+    final l = lRaw ?? (state.eyeOpenSeen ? 0.0 : 1.0);
+    final r = rRaw ?? (state.eyeOpenSeen ? 0.0 : 1.0);
+
+    if (l > FaceThresholds.eyeOpen && r > FaceThresholds.eyeOpen) {
+      state = state.copyWith(eyeOpenSeen: true);
+      if (state.isBlinking) {
+        state = state.copyWith(
+          livenessPassed: true,
+          isBlinking: false,
+          eyeOpenSeen: false,
+          status: 'Matching Identity...',
+        );
+        _log.fine('Liveness (blink) passed.');
+      }
+    } else if (state.eyeOpenSeen &&
+        l < FaceThresholds.eyeClosed &&
+        r < FaceThresholds.eyeClosed) {
+      state = state.copyWith(
+        isBlinking: true,
+        status: 'Blink to verify...',
+      );
+    }
+  }
+
+  /// MOUTH_OPEN: open mouth (ratio > mouthOpenEnter) → close
+  /// (ratio < mouthCloseExit). Mirrors the enrolment FSM's hysteresis
+  /// thresholds so the verify side doesn't drift from the calibration
+  /// the user already learned at enrol time. Returns silently when ML
+  /// Kit can't compute the ratio (missing landmarks) — the next frame
+  /// re-tries.
+  void _handleMouthOpen(FaceData face) {
+    final ratio = _mouthOpenRatio(face);
+    if (ratio == null) return;
+
+    if (!_mouthOpened) {
+      if (ratio > FaceThresholds.mouthOpenEnter) {
+        _mouthOpened = true;
+        state = state.copyWith(status: 'Now close your mouth.');
+      }
+    } else if (ratio < FaceThresholds.mouthCloseExit) {
+      state = state.copyWith(
+        livenessPassed: true,
+        status: 'Matching Identity...',
+      );
+      _log.fine('Liveness (mouth open → close) passed.');
+    }
+  }
+
+  /// TURN_LEFT / TURN_RIGHT: yaw reaches the threshold in the prescribed
+  /// direction, then returns near centre (|yaw| < stillAngle) so the
+  /// match-phase embedding is extracted from a forward-facing frame.
+  /// The "return to centre" step is what keeps probes comparable to the
+  /// forward-facing enrolment templates.
+  void _handleTurn(FaceData face, {required bool leftward}) {
+    final yaw = face.headEulerY;
+    final reached = leftward
+        ? yaw > FaceThresholds.yawTurn
+        : yaw < -FaceThresholds.yawTurn;
+
+    if (!_turnReached) {
+      if (reached) {
+        _turnReached = true;
+        state = state.copyWith(
+            status: leftward
+                ? 'Good — now look back at the camera.'
+                : 'Good — now look back at the camera.');
+      }
+    } else if (yaw.abs() < FaceThresholds.stillAngle) {
+      state = state.copyWith(
+        livenessPassed: true,
+        status: 'Matching Identity...',
+      );
+      _log.fine('Liveness (turn ${leftward ? "left" : "right"}) passed.');
+    }
+  }
+
+  /// Nose-to-mouth distance / inter-eye distance. Mirrors the same
+  /// ratio used by [LivenessStateMachine] so verify and enrol agree
+  /// on what "open" / "closed" looks like.
+  double? _mouthOpenRatio(FaceData face) {
+    final leftEye = face.landmarks[FaceLandmarkType.leftEye];
+    final rightEye = face.landmarks[FaceLandmarkType.rightEye];
+    final nose = face.landmarks[FaceLandmarkType.noseBase];
+    final mouth = face.landmarks[FaceLandmarkType.bottomMouth];
+    if (leftEye == null || rightEye == null || nose == null || mouth == null) {
+      return null;
+    }
+    final dx = (leftEye.x - rightEye.x).toDouble();
+    final dy = (leftEye.y - rightEye.y).toDouble();
+    final eyeDist = sqrt(dx * dx + dy * dy);
+    if (eyeDist < 20) return null;
+    final mdx = (nose.x - mouth.x).toDouble();
+    final mdy = (nose.y - mouth.y).toDouble();
+    final noseToMouth = sqrt(mdx * mdx + mdy * mdy);
+    final ratio = noseToMouth / eyeDist;
+    if (ratio < 0.3 || ratio > 1.5) return null;
+    return ratio;
   }
 
   Future<void> _runMatch(CameraImage raw, FaceData face) async {
@@ -431,9 +602,15 @@ class VerificationController extends AutoDisposeNotifier<VerificationState> {
     // Anti-spoof: reset the motion buffer so a previous static-frame
     // verdict doesn't leak into the next attempt's first second.
     _motion.reset();
+    _resetChallengeProgress();
+    // Pick a fresh challenge so an attacker who saw the prior prompt
+    // can't pre-record the next one. The pick is uniform with
+    // replacement, so consecutive attempts can repeat — that's the
+    // honest 1-in-N probability we want.
     state = state.copyWith(
       showResult: false,
-      blinkDetected: false,
+      challenge: _pickChallenge(),
+      livenessPassed: false,
       isBlinking: false,
       eyeOpenSeen: false,
       isVerifying: false,
