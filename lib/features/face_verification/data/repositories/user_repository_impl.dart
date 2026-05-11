@@ -6,6 +6,7 @@ import 'package:logging/logging.dart';
 import '../../../../core/constants/thresholds.dart';
 import '../../../../core/security/template_crypto.dart';
 import '../../../../core/utils/byte_layout.dart';
+import '../../../../core/utils/template_meta_codec.dart';
 import '../../../../data/database/app_database.dart';
 import '../../../../data/database/daos/user_dao.dart';
 import '../../domain/entities/user.dart';
@@ -138,6 +139,13 @@ class UserRepositoryImpl implements UserRepository {
     try {
       final raw = await _crypto.decrypt(row.faceTemplates);
       final templates = FaceTemplatesCodec.decode(raw);
+      // templateMeta is its own encrypted blob, intentionally separate
+      // from the embeddings so a future per-template metadata extension
+      // (e.g. depth flag, capture device ID) doesn't churn the larger
+      // templates payload. Failure to decrypt the meta blob is non-fatal
+      // — we fall back to an empty list, treating every template as
+      // glasses-off; the matcher does not care.
+      final meta = await _decodeMeta(row.templateMeta);
       return User(
         userId: row.userId,
         name: row.name,
@@ -148,6 +156,7 @@ class UserRepositoryImpl implements UserRepository {
         lastVerifiedAt: row.lastVerifiedAt,
         modelVersion: row.modelVersion,
         lastEnrolledAt: row.lastEnrolledAt,
+        templateMeta: meta,
       );
     } catch (e, st) {
       _log.warning('Failed to decrypt templates for ${row.userId}', e, st);
@@ -165,9 +174,31 @@ class UserRepositoryImpl implements UserRepository {
     }
   }
 
+  /// Decrypt + decode the per-template metadata blob. Null / empty
+  /// blobs (legacy rows from before the meta column was wired) return
+  /// an empty list.
+  Future<List<FaceTemplateMeta>> _decodeMeta(Uint8List? blob) async {
+    if (blob == null || blob.isEmpty) {
+      return const <FaceTemplateMeta>[];
+    }
+    try {
+      final raw = await _crypto.decrypt(blob);
+      return FaceTemplateMetaCodec.decode(raw);
+    } catch (e, st) {
+      _log.warning('Failed to decrypt templateMeta', e, st);
+      return const <FaceTemplateMeta>[];
+    }
+  }
+
   Future<UsersCompanion> _userToCompanion(User user) async {
     final raw = FaceTemplatesCodec.encode(user.faceTemplates);
     final encrypted = await _crypto.encrypt(raw);
+    // Encrypt the meta blob with the same crypto stack. Empty meta
+    // lists encode to a 4-byte zero header which is fine to encrypt
+    // — distinguishing "no meta yet" from "meta of length 0" doesn't
+    // matter for any consumer.
+    final metaRaw = FaceTemplateMetaCodec.encode(user.templateMeta);
+    final metaEncrypted = await _crypto.encrypt(metaRaw);
     return UsersCompanion(
       userId: Value(user.userId),
       name: Value(user.name),
@@ -187,6 +218,7 @@ class UserRepositoryImpl implements UserRepository {
       lastEnrolledAt: user.lastEnrolledAt == null
           ? const Value.absent()
           : Value(user.lastEnrolledAt),
+      templateMeta: Value(metaEncrypted),
     );
   }
 }

@@ -178,6 +178,10 @@ class _LiveEnrollmentScreenState extends ConsumerState<LiveEnrollmentScreen> {
               final result = await controller.register(
                 userCode: code,
                 userName: name,
+                // Carries the form's "Currently wearing glasses?"
+                // toggle through to EnrollUser so the FaceTemplateMeta
+                // entry is stamped with the right state.
+                wearsGlasses: widget.pending?.wearsGlasses ?? false,
               );
               if (!mounted) return;
               Navigator.of(context).pop();

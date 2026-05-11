@@ -1,6 +1,7 @@
 import 'dart:typed_data';
 
 import 'package:face_ios_android/core/constants/thresholds.dart';
+import 'package:face_ios_android/core/utils/template_meta_codec.dart';
 import 'package:face_ios_android/features/face_verification/domain/entities/user.dart';
 import 'package:flutter_test/flutter_test.dart';
 
@@ -8,6 +9,7 @@ User _make({
   int modelVersion = 0,
   DateTime? enrolledAt,
   DateTime? lastEnrolledAt,
+  List<FaceTemplateMeta> templateMeta = const <FaceTemplateMeta>[],
 }) =>
     User(
       userId: 'U1',
@@ -17,6 +19,7 @@ User _make({
       modelVersion: modelVersion,
       enrolledAt: enrolledAt,
       lastEnrolledAt: lastEnrolledAt,
+      templateMeta: templateMeta,
     );
 
 void main() {
@@ -124,5 +127,45 @@ void main() {
     );
     final cleared = u.copyWith(clearLastEnrolledAt: true);
     expect(cleared.lastEnrolledAt, isNull);
+  });
+
+  group('User templateMeta helpers', () {
+    final stamp = DateTime.utc(2026, 5, 11);
+
+    test('empty metadata defaults to bare-face only', () {
+      final u = _make();
+      expect(u.hasGlassesTemplate, isFalse);
+      // Legacy rows (no templateMeta) get the bare-face default so
+      // they keep matching against bare-face probes.
+      expect(u.hasBareFaceTemplate, isTrue);
+    });
+
+    test('glasses-only metadata reports hasGlassesTemplate', () {
+      final u = _make(templateMeta: <FaceTemplateMeta>[
+        FaceTemplateMeta(wearsGlasses: true, capturedAt: stamp),
+      ]);
+      expect(u.hasGlassesTemplate, isTrue);
+      expect(u.hasBareFaceTemplate, isFalse);
+    });
+
+    test('mixed metadata reports both', () {
+      final u = _make(templateMeta: <FaceTemplateMeta>[
+        FaceTemplateMeta(wearsGlasses: false, capturedAt: stamp),
+        FaceTemplateMeta(wearsGlasses: true, capturedAt: stamp),
+      ]);
+      expect(u.hasGlassesTemplate, isTrue);
+      expect(u.hasBareFaceTemplate, isTrue);
+    });
+
+    test('copyWith updates templateMeta when supplied', () {
+      final u = _make();
+      final replaced = u.copyWith(
+        templateMeta: <FaceTemplateMeta>[
+          FaceTemplateMeta(wearsGlasses: true, capturedAt: stamp),
+        ],
+      );
+      expect(replaced.templateMeta, hasLength(1));
+      expect(replaced.templateMeta.first.wearsGlasses, isTrue);
+    });
   });
 }

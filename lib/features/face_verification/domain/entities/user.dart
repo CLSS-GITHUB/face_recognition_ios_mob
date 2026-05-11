@@ -1,6 +1,7 @@
 import 'dart:typed_data';
 
 import '../../../../core/constants/thresholds.dart';
+import '../../../../core/utils/template_meta_codec.dart';
 
 /// Domain entity. The Drift `UserRow` lives in the data layer; this is the
 /// shape the UI and use cases work with.
@@ -15,6 +16,7 @@ class User {
     this.lastVerifiedAt,
     this.modelVersion = 0,
     this.lastEnrolledAt,
+    this.templateMeta = const <FaceTemplateMeta>[],
   });
 
   final String userId;
@@ -45,6 +47,27 @@ class User {
   /// still defeats slow drift for inactive users. `null` for rows
   /// migrated up from schema v3; readers fall back to [enrolledAt].
   final DateTime? lastEnrolledAt;
+
+  /// Per-template metadata, indexed 1-to-1 with [faceTemplates]. Used
+  /// by the enrolment UX to surface "you have a glasses-on template
+  /// but no glasses-off template" prompts and by telemetry to slice
+  /// FRR by glasses-state. The matcher does not branch on this — it
+  /// picks the highest-cosine template per user — so a missing or
+  /// shorter metadata list is non-fatal: callers default missing
+  /// entries to `wearsGlasses=false`. See [FaceTemplateMetaCodec].
+  final List<FaceTemplateMeta> templateMeta;
+
+  /// True when at least one of this user's templates was captured
+  /// while they were wearing glasses. Used by the enrolment UX to
+  /// suggest re-enrolling with the opposite state.
+  bool get hasGlassesTemplate =>
+      templateMeta.any((m) => m.wearsGlasses);
+
+  /// True when at least one template was captured WITHOUT glasses.
+  /// Pairs with [hasGlassesTemplate] — a user covering both states
+  /// across re-enrolments has the most robust recognition.
+  bool get hasBareFaceTemplate =>
+      templateMeta.isEmpty || templateMeta.any((m) => !m.wearsGlasses);
 
   /// True when this user is unusable for matching as of [now], either
   /// because their templates were produced by a different face model
@@ -84,6 +107,7 @@ class User {
     int? modelVersion,
     DateTime? lastEnrolledAt,
     bool clearLastEnrolledAt = false,
+    List<FaceTemplateMeta>? templateMeta,
   }) {
     return User(
       userId: userId ?? this.userId,
@@ -98,6 +122,7 @@ class User {
       lastEnrolledAt: clearLastEnrolledAt
           ? null
           : (lastEnrolledAt ?? this.lastEnrolledAt),
+      templateMeta: templateMeta ?? this.templateMeta,
     );
   }
 }

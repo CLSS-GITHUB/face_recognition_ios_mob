@@ -3,6 +3,7 @@ import 'dart:typed_data';
 import 'package:uuid/uuid.dart';
 
 import '../../../../core/constants/thresholds.dart';
+import '../../../../core/utils/template_meta_codec.dart';
 import '../../../../services/face_matching_service.dart';
 import '../entities/enrollment_result.dart';
 import '../entities/user.dart';
@@ -27,6 +28,7 @@ class EnrollUser {
     required String userName,
     required Float32List embedding,
     String? imagePath,
+    bool wearsGlasses = false,
   }) async {
     final trimmedId = userCode.trim();
     final trimmedName = userName.trim();
@@ -35,6 +37,13 @@ class EnrollUser {
     // race (they can't here — single-threaded — but it keeps log
     // semantics explicit).
     final now = DateTime.now().toUtc();
+    // Metadata entry for *this* enrolment. Always appended (or used
+    // as the replacement set) in lockstep with the embedding, so
+    // templateMeta stays index-aligned with faceTemplates.
+    final newMeta = FaceTemplateMeta(
+      wearsGlasses: wearsGlasses,
+      capturedAt: now,
+    );
 
     final all = await _repo.getAll();
     User? existing;
@@ -86,6 +95,12 @@ class EnrollUser {
         // what keeps active re-enrollers from drifting into the
         // templateMaxAgeDays bucket between captures.
         lastEnrolledAt: now,
+        // templateMeta moves index-for-index with faceTemplates: when
+        // we replace the template list (stale-model re-enrol) we also
+        // replace the metadata, otherwise we append a fresh meta entry.
+        templateMeta: isReEnrol
+            ? <FaceTemplateMeta>[newMeta]
+            : [...existing.templateMeta, newMeta],
       );
       await _repo.upsert(updated);
       return TemplateAddedToExisting(updated);
@@ -103,6 +118,7 @@ class EnrollUser {
       // freshness clock starts now (not at `enrolledAt`, which is what
       // Drift's clientDefault would otherwise lazy-set on insert).
       lastEnrolledAt: now,
+      templateMeta: <FaceTemplateMeta>[newMeta],
     );
     await _repo.upsert(user);
     return NewUserEnrolled(user);

@@ -426,6 +426,7 @@ class EnrollmentController extends AutoDisposeNotifier<EnrollmentState> {
   Future<EnrollmentResult> register({
     required String userCode,
     required String userName,
+    bool wearsGlasses = false,
   }) async {
     final embedding = state.capturedEmbedding;
     if (embedding == null) {
@@ -437,6 +438,11 @@ class EnrollmentController extends AutoDisposeNotifier<EnrollmentState> {
       userName: userName,
       embedding: embedding,
       imagePath: state.capturedImagePath,
+      // Threaded from the enrol form's "Currently wearing glasses?"
+      // switch via PendingEnrollment.wearsGlasses. Stamped into
+      // FaceTemplateMeta so a later glasses-toggle re-enrol picks up
+      // an opposite-state template alongside the original.
+      wearsGlasses: wearsGlasses,
     );
   }
 

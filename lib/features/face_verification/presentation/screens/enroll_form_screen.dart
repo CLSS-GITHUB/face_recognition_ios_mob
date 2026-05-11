@@ -14,6 +14,13 @@ class _EnrollFormScreenState extends State<EnrollFormScreen> {
   final _userCode = TextEditingController();
   final _userName = TextEditingController();
 
+  /// User self-reports whether they're wearing glasses RIGHT NOW.
+  /// Stamped into the captured template's metadata so a complementary
+  /// re-enrol (opposite state, same userId) builds a multi-template
+  /// user whose recognition is robust across both glasses states.
+  /// Defaults to false — the common case is bare-face enrolment.
+  bool _wearsGlasses = false;
+
   @override
   void dispose() {
     _userCode.dispose();
@@ -71,7 +78,27 @@ class _EnrollFormScreenState extends State<EnrollFormScreen> {
                   ),
                 ),
               ),
-              const SizedBox(height: 48),
+              const SizedBox(height: 24),
+              // Glasses self-report. Stamps into the template's
+              // metadata so a later opposite-state re-enrol (same
+              // userId) builds a multi-template user covering both
+              // states. The matcher picks the closest template per
+              // user at verify time — no explicit branching needed.
+              SwitchListTile.adaptive(
+                value: _wearsGlasses,
+                onChanged: (v) => setState(() => _wearsGlasses = v),
+                contentPadding: EdgeInsets.zero,
+                title: const Text("I'm wearing glasses right now"),
+                subtitle: Text(
+                  'For best recognition, re-enroll later with the '
+                  'opposite state — both captures are stored under the '
+                  'same employee.',
+                  style: Theme.of(context).textTheme.bodySmall?.copyWith(
+                        color: Theme.of(context).colorScheme.onSurfaceVariant,
+                      ),
+                ),
+              ),
+              const SizedBox(height: 24),
               SizedBox(
                 width: double.infinity,
                 height: 56,
@@ -82,6 +109,7 @@ class _EnrollFormScreenState extends State<EnrollFormScreen> {
                             extra: PendingEnrollment(
                               userCode: _userCode.text.trim(),
                               userName: _userName.text.trim(),
+                              wearsGlasses: _wearsGlasses,
                             ),
                           )
                       : null,
