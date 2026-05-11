@@ -36,11 +36,19 @@ class EmbeddingIsolate {
     required SendPort workerPort,
     required Isolate isolate,
     required ReceivePort responsePort,
+    required this.delegateLabel,
   })  : _workerPort = workerPort,
         _isolate = isolate,
         _responsePort = responsePort {
     _subscription = _responsePort.listen(_onResponse);
   }
+
+  /// Human-readable identifier of the TFLite execution path actually in
+  /// use. One of `"xnnpack"`, `"cpu"`, `"cpu(xnnpack-validation-fail:…)"`,
+  /// `"cpu(xnnpack-construct-fail:…)"`, or `"stub"` in test mode.
+  /// Surfaced to /debug/health so a field operator can tell which path
+  /// the device ended up on without an interactive debugger.
+  final String delegateLabel;
 
   static const int _bytesExpected =
       FaceThresholds.inputSize * FaceThresholds.inputSize * 3;
@@ -117,15 +125,16 @@ class EmbeddingIsolate {
       isolate.kill(priority: Isolate.immediate);
       throw EmbeddingIsolateUnavailableError(initial.reason);
     }
-    final SendPort workerPort = initial as SendPort;
+    final _IsolateReady readyMsg = initial as _IsolateReady;
 
     final responsePort = ReceivePort();
-    workerPort.send(_HelloMessage(responsePort.sendPort));
+    readyMsg.workerPort.send(_HelloMessage(responsePort.sendPort));
 
     return EmbeddingIsolate._(
-      workerPort: workerPort,
+      workerPort: readyMsg.workerPort,
       isolate: isolate,
       responsePort: responsePort,
+      delegateLabel: readyMsg.delegateLabel,
     );
   }
 
@@ -284,6 +293,12 @@ class _IsolateInitFailure {
   final String reason;
 }
 
+class _IsolateReady {
+  const _IsolateReady(this.workerPort, this.delegateLabel);
+  final SendPort workerPort;
+  final String delegateLabel;
+}
+
 class _HelloMessage {
   const _HelloMessage(this.replyTo);
   final SendPort replyTo;
@@ -338,67 +353,37 @@ class _ExtractFailure {
 // ---------------------------------------------------------------------------
 
 Future<void> _isolateMain(_SpawnArgs args) async {
-  Interpreter? interpreter;
-  if (args.config.useTflite) {
-    try {
-      final options = InterpreterOptions()
-        ..threads = FaceThresholds.tfliteThreads;
-      interpreter = Interpreter.fromBuffer(
-        args.config.modelBytes,
-        options: options,
-      );
-    } catch (e) {
-      args.replyTo.send(
-        _IsolateInitFailure('Interpreter.fromBuffer failed: $e'),
-      );
-      return;
-    }
-
-    // Validate the loaded model's output tensor shape matches what
-    // the rest of the pipeline expects. Catches the "wrong .tflite
-    // dropped into assets/models/" failure mode at startup with a
-    // clear error, instead of silently shipping wrong-dim embeddings
-    // that the matcher would happily accept but score against the
-    // wrong feature space. Expected shape: [1, embeddingDim].
-    try {
-      final outShape = interpreter.getOutputTensor(0).shape;
-      final ok = outShape.length == 2 &&
-          outShape[0] == 1 &&
-          outShape[1] == FaceThresholds.embeddingDim;
-      if (!ok) {
-        interpreter.close();
-        args.replyTo.send(
-          _IsolateInitFailure(
-            'Model output shape $outShape does not match expected '
-            '[1, ${FaceThresholds.embeddingDim}]. Update '
-            'FaceThresholds.embeddingDim / modelVersion before shipping '
-            'this model.',
-          ),
-        );
-        return;
-      }
-    } catch (e) {
-      // getOutputTensor failures on a model that loaded but is corrupt
-      // — surface the same init-failure path so the host falls back to
-      // its "isolate unavailable" UX rather than crashing.
-      interpreter.close();
-      args.replyTo.send(
-        _IsolateInitFailure('Output-tensor shape inspection failed: $e'),
-      );
-      return;
-    }
-  }
-
   // Pre-allocate the TFLite I/O buffers ONCE at isolate startup and
   // reuse on every extract. The 1×112×112×3 nested-list input is ~150 KB
   // of `double`s; rebuilding it per frame allocated ~6 ms / extract on a
   // Pixel 6 (architecture §8). We overwrite the slots in-place inside
-  // `_runTfliteInto`.
+  // `_runTfliteInto`. The startup validation step in `_selectInterpreter`
+  // reuses these same buffers, so the "first real frame" cost is the
+  // same whether or not XNNPACK is in play.
   final reusableInput = _allocInputBuffer();
   final reusableOutput = _allocOutputBuffer();
 
+  Interpreter? interpreter;
+  Delegate? delegate;
+  String delegateLabel = 'stub';
+
+  if (args.config.useTflite) {
+    final result = _selectInterpreter(
+      args.config.modelBytes,
+      reusableInput,
+      reusableOutput,
+    );
+    if (result.failure != null) {
+      args.replyTo.send(_IsolateInitFailure(result.failure!));
+      return;
+    }
+    interpreter = result.interpreter;
+    delegate = result.delegate;
+    delegateLabel = result.label;
+  }
+
   final inbox = ReceivePort();
-  args.replyTo.send(inbox.sendPort);
+  args.replyTo.send(_IsolateReady(inbox.sendPort, delegateLabel));
 
   // ReceivePort is a single-subscription stream — we must do all reads
   // through one `await for`. The first message is expected to be the
@@ -475,9 +460,201 @@ Future<void> _isolateMain(_SpawnArgs args) async {
       }
     }
   } finally {
+    // Order matters: close the interpreter BEFORE deleting the delegate
+    // so the native handle has no live references to a delegate that's
+    // already been torn down. `Delegate.delete` is best-effort — if the
+    // wrapper was already nulled out by the interpreter's close path
+    // we'd rather log-and-continue than crash the shutdown sequence.
     interpreter?.close();
+    if (delegate != null) {
+      try {
+        delegate.delete();
+      } catch (_) {
+        // Already deleted by the interpreter's close path. Fine.
+      }
+    }
     inbox.close();
   }
+}
+
+/// Result of the startup interpreter-selection step: either an
+/// initialised interpreter (with optional delegate) plus a label, or a
+/// failure reason that the host turns into an
+/// [EmbeddingIsolateUnavailableError].
+class _SelectionResult {
+  _SelectionResult.success({
+    required this.interpreter,
+    required this.delegate,
+    required this.label,
+  }) : failure = null;
+  _SelectionResult.failure(this.failure)
+      : interpreter = null,
+        delegate = null,
+        label = '';
+
+  final Interpreter? interpreter;
+  final Delegate? delegate;
+  final String label;
+  final String? failure;
+}
+
+/// Builds the live interpreter for this isolate, preferring XNNPACK and
+/// falling back to plain CPU when the delegate either won't construct or
+/// disagrees with the CPU reference on a deterministic test vector.
+///
+/// XNNPACK is well-behaved for FP32 dense ops on every modern ARM chip,
+/// but the only way to be *sure* an enrolled template (extracted by CPU
+/// pre-upgrade) and a probe (extracted by XNNPACK post-upgrade) end up
+/// in the same feature space is to compare outputs on the same input.
+/// We require cosine ≥ 0.999 — a few ulps of FP drift is fine, a wrong
+/// op-fusion that flips an axis is not.
+_SelectionResult _selectInterpreter(
+  Uint8List modelBytes,
+  List<List<List<List<double>>>> reusableInput,
+  List<List<double>> reusableOutput,
+) {
+  // 1. Baseline CPU interpreter — also validates model output shape.
+  Interpreter cpu;
+  try {
+    final opts = InterpreterOptions()
+      ..threads = FaceThresholds.tfliteThreads;
+    cpu = Interpreter.fromBuffer(modelBytes, options: opts);
+  } catch (e) {
+    return _SelectionResult.failure('Interpreter.fromBuffer failed: $e');
+  }
+
+  // Output-tensor shape check. Catches "wrong .tflite dropped into
+  // assets/models/" at startup instead of letting the matcher silently
+  // score against the wrong feature space.
+  try {
+    final outShape = cpu.getOutputTensor(0).shape;
+    final ok = outShape.length == 2 &&
+        outShape[0] == 1 &&
+        outShape[1] == FaceThresholds.embeddingDim;
+    if (!ok) {
+      cpu.close();
+      return _SelectionResult.failure(
+        'Model output shape $outShape does not match expected '
+        '[1, ${FaceThresholds.embeddingDim}]. Update '
+        'FaceThresholds.embeddingDim / modelVersion before shipping '
+        'this model.',
+      );
+    }
+  } catch (e) {
+    cpu.close();
+    return _SelectionResult.failure(
+      'Output-tensor shape inspection failed: $e',
+    );
+  }
+
+  // 2. CPU golden — captured on a deterministic ramp. The bytes don't
+  //    have to be face-like; we're only checking the XNNPACK output
+  //    agrees with CPU pixel-by-pixel of the same input.
+  final testBytes = _validationTestBytes();
+  Float32List goldenCpu;
+  try {
+    goldenCpu = _runTfliteInto(
+      cpu,
+      testBytes,
+      reusableInput,
+      reusableOutput,
+    );
+  } catch (e) {
+    cpu.close();
+    return _SelectionResult.failure('CPU golden inference failed: $e');
+  }
+
+  // 3. Try XNNPACK. Any failure → keep CPU.
+  Delegate? xnn;
+  Interpreter? xnnInterp;
+  try {
+    xnn = XNNPackDelegate(
+      options: XNNPackDelegateOptions(
+        numThreads: FaceThresholds.tfliteThreads,
+      ),
+    );
+    final opts = InterpreterOptions()
+      ..threads = FaceThresholds.tfliteThreads
+      ..addDelegate(xnn);
+    xnnInterp = Interpreter.fromBuffer(modelBytes, options: opts);
+  } catch (e) {
+    try {
+      xnn?.delete();
+    } catch (_) {}
+    return _SelectionResult.success(
+      interpreter: cpu,
+      delegate: null,
+      label: 'cpu(xnnpack-construct-fail:$e)',
+    );
+  }
+
+  // 4. XNNPACK output check.
+  Float32List xnnEmb;
+  try {
+    xnnEmb = _runTfliteInto(
+      xnnInterp,
+      testBytes,
+      reusableInput,
+      reusableOutput,
+    );
+  } catch (e) {
+    xnnInterp.close();
+    try {
+      xnn.delete();
+    } catch (_) {}
+    return _SelectionResult.success(
+      interpreter: cpu,
+      delegate: null,
+      label: 'cpu(xnnpack-infer-fail:$e)',
+    );
+  }
+
+  final sim = _cosineL2Normalised(goldenCpu, xnnEmb);
+  if (sim >= 0.999) {
+    // XNNPACK matches CPU — keep XNNPACK, drop the validation CPU.
+    cpu.close();
+    return _SelectionResult.success(
+      interpreter: xnnInterp,
+      delegate: xnn,
+      label: 'xnnpack',
+    );
+  }
+
+  // Diverged. Keep CPU; report the observed similarity so /debug/health
+  // tells us exactly how far off the device's XNNPACK landed.
+  xnnInterp.close();
+  try {
+    xnn.delete();
+  } catch (_) {}
+  return _SelectionResult.success(
+    interpreter: cpu,
+    delegate: null,
+    label: 'cpu(xnnpack-validation-fail:${sim.toStringAsFixed(4)})',
+  );
+}
+
+/// Cosine similarity over two L2-normalised vectors — same length is a
+/// precondition (the model output dim is fixed). Reduces to a dot
+/// product; no extra sqrt or norm needed.
+double _cosineL2Normalised(Float32List a, Float32List b) {
+  if (a.length != b.length) return 0;
+  var sum = 0.0;
+  for (var i = 0; i < a.length; i++) {
+    sum += a[i] * b[i];
+  }
+  return sum;
+}
+
+/// Deterministic ramp pattern used at startup to compare CPU vs delegate
+/// output. Same bytes every time so the validation is reproducible across
+/// runs and across devices.
+Uint8List _validationTestBytes() {
+  const n = FaceThresholds.inputSize * FaceThresholds.inputSize * 3;
+  final out = Uint8List(n);
+  for (var i = 0; i < n; i++) {
+    out[i] = i & 0xff;
+  }
+  return out;
 }
 
 List<List<List<List<double>>>> _allocInputBuffer() {

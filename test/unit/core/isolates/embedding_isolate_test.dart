@@ -124,6 +124,19 @@ void main() {
       await iso.close();
       await iso.close(); // must not throw
     });
+
+    test('stub-mode isolate reports delegateLabel == "stub"', () async {
+      // The XNNPACK selection step is skipped when useTflite is false,
+      // so the wire-level init reply must surface a stable sentinel.
+      // /debug/health relies on this row never being null once the
+      // isolate has resolved.
+      final iso = await EmbeddingIsolate.spawnTestStub();
+      try {
+        expect(iso.delegateLabel, 'stub');
+      } finally {
+        await iso.close();
+      }
+    });
   });
 
   // Phase D — preparation pipeline (decode + crop + align + resize) runs on

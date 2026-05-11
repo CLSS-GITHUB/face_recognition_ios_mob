@@ -23,6 +23,7 @@ class DebugHealthReport {
     required this.logCountLast24h,
     required this.isolateReady,
     required this.isolateError,
+    required this.isolateDelegate,
     required this.cameraPermissionGranted,
     required this.security,
     required this.thresholds,
@@ -44,6 +45,12 @@ class DebugHealthReport {
   /// look like a failure.
   final bool? isolateReady;
   final String? isolateError;
+
+  /// Identifier of the TFLite execution path actually selected at
+  /// spawn time. `null` while the isolate is still spawning (so the
+  /// row reads as "spawning…" in concert with [isolateReady]).
+  /// See [EmbeddingIsolate.delegateLabel] for the format.
+  final String? isolateDelegate;
 
   final bool cameraPermissionGranted;
   final SecurityStatus security;
@@ -72,6 +79,7 @@ class DebugHealthReport {
         'embeddingIsolate': <String, Object?>{
           'ready': isolateReady,
           'error': isolateError,
+          'delegate': isolateDelegate,
         },
         'cameraPermissionGranted': cameraPermissionGranted,
         'security': <String, bool>{
@@ -177,6 +185,10 @@ final debugHealthReportProvider =
     error: (e, _) => e.toString(),
     orElse: () => null,
   );
+  final isolateDelegate = isolateAsync.maybeWhen(
+    data: (iso) => iso.delegateLabel,
+    orElse: () => null,
+  );
 
   final cameraGranted =
       ref.watch(cameraPermissionProvider).valueOrNull ?? false;
@@ -192,6 +204,7 @@ final debugHealthReportProvider =
     logCountLast24h: log24h,
     isolateReady: isolateReady,
     isolateError: isolateError,
+    isolateDelegate: isolateDelegate,
     cameraPermissionGranted: cameraGranted,
     security: security,
     thresholds: _thresholdsSnapshot(),
@@ -313,6 +326,7 @@ class _ReportBody extends StatelessWidget {
                 null => 'spawning…',
               },
             ),
+            _kv('TFLite delegate', report.isolateDelegate ?? 'spawning…'),
             if (report.isolateError != null)
               _kv('Error', report.isolateError!),
           ],
