@@ -259,6 +259,40 @@ Future<void> _isolateMain(_SpawnArgs args) async {
       );
       return;
     }
+
+    // Validate the loaded model's output tensor shape matches what
+    // the rest of the pipeline expects. Catches the "wrong .tflite
+    // dropped into assets/models/" failure mode at startup with a
+    // clear error, instead of silently shipping wrong-dim embeddings
+    // that the matcher would happily accept but score against the
+    // wrong feature space. Expected shape: [1, embeddingDim].
+    try {
+      final outShape = interpreter.getOutputTensor(0).shape;
+      final ok = outShape.length == 2 &&
+          outShape[0] == 1 &&
+          outShape[1] == FaceThresholds.embeddingDim;
+      if (!ok) {
+        interpreter.close();
+        args.replyTo.send(
+          _IsolateInitFailure(
+            'Model output shape $outShape does not match expected '
+            '[1, ${FaceThresholds.embeddingDim}]. Update '
+            'FaceThresholds.embeddingDim / modelVersion before shipping '
+            'this model.',
+          ),
+        );
+        return;
+      }
+    } catch (e) {
+      // getOutputTensor failures on a model that loaded but is corrupt
+      // — surface the same init-failure path so the host falls back to
+      // its "isolate unavailable" UX rather than crashing.
+      interpreter.close();
+      args.replyTo.send(
+        _IsolateInitFailure('Output-tensor shape inspection failed: $e'),
+      );
+      return;
+    }
   }
 
   // Pre-allocate the TFLite I/O buffers ONCE at isolate startup and

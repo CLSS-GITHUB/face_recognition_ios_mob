@@ -41,6 +41,18 @@ void main() {
       expect(FaceThresholds.reEnrollVerifyThreshold, 0.80);
       expect(FaceThresholds.duplicateFaceThreshold, 0.85);
       expect(FaceThresholds.templateDedupThreshold, 0.95);
+      // Open-set safety margin — added with the multi-user fix
+      // (commit 731bd38). Must stay >= 0.03 per the matcher tests.
+      expect(FaceThresholds.verifyUserMargin, 0.04);
+      // Bound on linear-scan cost per user. Newest templates win on
+      // overflow (see UserRepositoryImpl.activeFlatTemplates).
+      expect(FaceThresholds.maxTemplatesPerUserMatched, 8);
+    });
+
+    test('model versioning', () {
+      // Bump together with embeddingDim / verifyThreshold whenever a
+      // new face-recognition model checkpoint is shipped.
+      expect(FaceThresholds.modelVersion, 1);
     });
 
     test('retry & storage guards', () {

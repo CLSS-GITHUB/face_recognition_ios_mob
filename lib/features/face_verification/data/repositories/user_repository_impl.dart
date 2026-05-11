@@ -62,15 +62,25 @@ class UserRepositoryImpl implements UserRepository {
     final users = await getActive();
     const dim = FaceThresholds.embeddingDim;
     const perUserCap = FaceThresholds.maxTemplatesPerUserMatched;
+    const currentModel = FaceThresholds.modelVersion;
 
-    // First pass: count only valid templates (right-sized) and cap per
-    // user. Newer templates win on overflow — they are at the tail of
-    // the list (EnrollUser appends). Counting first avoids the buffer
-    // over-allocation the previous implementation had when any stored
-    // template was the wrong length.
+    // First pass: count only valid templates (right-sized **and** from
+    // the current model version) and cap per user. Templates from any
+    // other model version live in a different feature space and would
+    // produce meaningless cosine scores against a fresh probe — we skip
+    // them entirely and let the UI surface a re-enrol prompt via
+    // `User.requiresReEnroll`. Newer templates win on overflow (they
+    // are at the tail of the list — EnrollUser appends).
     var total = 0;
     final perUserUsed = <int>[];
     for (final u in users) {
+      // Stale-model users contribute zero templates to the matching
+      // bank, but still appear in repository.getActive() so the UI can
+      // show them as "needs re-enrolment".
+      if (u.modelVersion != currentModel) {
+        perUserUsed.add(0);
+        continue;
+      }
       var c = 0;
       // Iterate in reverse so we keep the newest `perUserCap` templates
       // when a user has been re-enrolled many times.
@@ -136,6 +146,7 @@ class UserRepositoryImpl implements UserRepository {
         imagePath: row.imagePath,
         enrolledAt: row.enrolledAt,
         lastVerifiedAt: row.lastVerifiedAt,
+        modelVersion: row.modelVersion,
       );
     } catch (e, st) {
       _log.warning('Failed to decrypt templates for ${row.userId}', e, st);
@@ -147,6 +158,7 @@ class UserRepositoryImpl implements UserRepository {
         imagePath: row.imagePath,
         enrolledAt: row.enrolledAt,
         lastVerifiedAt: row.lastVerifiedAt,
+        modelVersion: row.modelVersion,
       );
     }
   }
@@ -169,6 +181,7 @@ class UserRepositoryImpl implements UserRepository {
       lastVerifiedAt: user.lastVerifiedAt == null
           ? const Value.absent()
           : Value(user.lastVerifiedAt),
+      modelVersion: Value(user.modelVersion),
     );
   }
 }

@@ -17,7 +17,7 @@ class AppDatabase extends _$AppDatabase {
       : super(executor ?? driftDatabase(name: 'face_verification_db'));
 
   @override
-  int get schemaVersion => 2;
+  int get schemaVersion => 3;
 
   @override
   MigrationStrategy get migration => MigrationStrategy(
@@ -35,6 +35,15 @@ class AppDatabase extends _$AppDatabase {
             await m.addColumn(users, users.templateMeta);
             await m.createTable(verificationLogs);
             await _createVerificationLogIndex(m);
+          }
+          if (from < 3) {
+            // model_version: int NOT NULL DEFAULT 0. Pre-v3 rows
+            // (templates from any model that didn't track version) get
+            // 0 and are filtered out of the active matching bank by
+            // UserRepositoryImpl.activeFlatTemplates. Users surface as
+            // `requiresReEnroll == true` so the UI can prompt a one-
+            // time re-capture instead of silently failing every match.
+            await m.addColumn(users, users.modelVersion);
           }
         },
         // Foreign keys are off by default in SQLite. We need them on so that

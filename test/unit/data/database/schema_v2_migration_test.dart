@@ -35,6 +35,10 @@ void main() {
         'enrolled_at',
         'last_verified_at',
         'template_meta',
+        // v3 — face-recognition model version that produced the stored
+        // templates. Pre-v3 rows default to 0 (= "legacy / unknown",
+        // surfaces in the domain layer as User.requiresReEnroll).
+        'model_version',
       ]));
 
       // Original v1 row is still there.
@@ -126,6 +130,30 @@ void main() {
       final after = await db.userDao.getUserById('U1');
       expect(after!.lastVerifiedAt, isNotNull);
       expect(after.lastVerifiedAt!.isAtSameMomentAs(stamp), isTrue);
+    });
+
+    test('v3 model_version: legacy rows default to 0, new rows can pick a value',
+        () async {
+      final db = AppDatabase(_v1MemoryExecutor());
+      addTearDown(db.close);
+
+      // Legacy row migrated from v1 → v3 should land at 0 (the column
+      // default applied by ALTER TABLE ADD COLUMN ... DEFAULT 0).
+      final legacy = await db.userDao.getUserById('U1');
+      expect(legacy!.modelVersion, 0,
+          reason: 'Pre-v3 rows must surface as legacy / re-enroll candidates.');
+
+      // New inserts can set the version explicitly via the companion.
+      await db.userDao.insertUser(
+        UsersCompanion.insert(
+          userId: 'U-new',
+          name: 'Charlie',
+          faceTemplates: Uint8List.fromList(<int>[0]),
+          modelVersion: const Value(1),
+        ),
+      );
+      final inserted = await db.userDao.getUserById('U-new');
+      expect(inserted!.modelVersion, 1);
     });
 
     test('purgeOlderThan deletes only old log rows', () async {

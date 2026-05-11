@@ -100,6 +100,18 @@ class $UsersTable extends Users with TableInfo<$UsersTable, UserRow> {
         type: DriftSqlType.blob,
         requiredDuringInsert: false,
       );
+  static const VerificationMeta _modelVersionMeta = const VerificationMeta(
+    'modelVersion',
+  );
+  @override
+  late final GeneratedColumn<int> modelVersion = GeneratedColumn<int>(
+    'model_version',
+    aliasedName,
+    false,
+    type: DriftSqlType.int,
+    requiredDuringInsert: false,
+    defaultValue: const Constant(0),
+  );
   @override
   List<GeneratedColumn> get $columns => [
     userId,
@@ -110,6 +122,7 @@ class $UsersTable extends Users with TableInfo<$UsersTable, UserRow> {
     enrolledAt,
     lastVerifiedAt,
     templateMeta,
+    modelVersion,
   ];
   @override
   String get aliasedName => _alias ?? actualTableName;
@@ -186,6 +199,15 @@ class $UsersTable extends Users with TableInfo<$UsersTable, UserRow> {
         ),
       );
     }
+    if (data.containsKey('model_version')) {
+      context.handle(
+        _modelVersionMeta,
+        modelVersion.isAcceptableOrUnknown(
+          data['model_version']!,
+          _modelVersionMeta,
+        ),
+      );
+    }
     return context;
   }
 
@@ -227,6 +249,10 @@ class $UsersTable extends Users with TableInfo<$UsersTable, UserRow> {
         DriftSqlType.blob,
         data['${effectivePrefix}template_meta'],
       ),
+      modelVersion: attachedDatabase.typeMapping.read(
+        DriftSqlType.int,
+        data['${effectivePrefix}model_version'],
+      )!,
     );
   }
 
@@ -245,6 +271,7 @@ class UserRow extends DataClass implements Insertable<UserRow> {
   final DateTime? enrolledAt;
   final DateTime? lastVerifiedAt;
   final Uint8List? templateMeta;
+  final int modelVersion;
   const UserRow({
     required this.userId,
     required this.name,
@@ -254,6 +281,7 @@ class UserRow extends DataClass implements Insertable<UserRow> {
     this.enrolledAt,
     this.lastVerifiedAt,
     this.templateMeta,
+    required this.modelVersion,
   });
   @override
   Map<String, Expression> toColumns(bool nullToAbsent) {
@@ -274,6 +302,7 @@ class UserRow extends DataClass implements Insertable<UserRow> {
     if (!nullToAbsent || templateMeta != null) {
       map['template_meta'] = Variable<Uint8List>(templateMeta);
     }
+    map['model_version'] = Variable<int>(modelVersion);
     return map;
   }
 
@@ -295,6 +324,7 @@ class UserRow extends DataClass implements Insertable<UserRow> {
       templateMeta: templateMeta == null && nullToAbsent
           ? const Value.absent()
           : Value(templateMeta),
+      modelVersion: Value(modelVersion),
     );
   }
 
@@ -312,6 +342,7 @@ class UserRow extends DataClass implements Insertable<UserRow> {
       enrolledAt: serializer.fromJson<DateTime?>(json['enrolledAt']),
       lastVerifiedAt: serializer.fromJson<DateTime?>(json['lastVerifiedAt']),
       templateMeta: serializer.fromJson<Uint8List?>(json['templateMeta']),
+      modelVersion: serializer.fromJson<int>(json['modelVersion']),
     );
   }
   @override
@@ -326,6 +357,7 @@ class UserRow extends DataClass implements Insertable<UserRow> {
       'enrolledAt': serializer.toJson<DateTime?>(enrolledAt),
       'lastVerifiedAt': serializer.toJson<DateTime?>(lastVerifiedAt),
       'templateMeta': serializer.toJson<Uint8List?>(templateMeta),
+      'modelVersion': serializer.toJson<int>(modelVersion),
     };
   }
 
@@ -338,6 +370,7 @@ class UserRow extends DataClass implements Insertable<UserRow> {
     Value<DateTime?> enrolledAt = const Value.absent(),
     Value<DateTime?> lastVerifiedAt = const Value.absent(),
     Value<Uint8List?> templateMeta = const Value.absent(),
+    int? modelVersion,
   }) => UserRow(
     userId: userId ?? this.userId,
     name: name ?? this.name,
@@ -349,6 +382,7 @@ class UserRow extends DataClass implements Insertable<UserRow> {
         ? lastVerifiedAt.value
         : this.lastVerifiedAt,
     templateMeta: templateMeta.present ? templateMeta.value : this.templateMeta,
+    modelVersion: modelVersion ?? this.modelVersion,
   );
   UserRow copyWithCompanion(UsersCompanion data) {
     return UserRow(
@@ -368,6 +402,9 @@ class UserRow extends DataClass implements Insertable<UserRow> {
       templateMeta: data.templateMeta.present
           ? data.templateMeta.value
           : this.templateMeta,
+      modelVersion: data.modelVersion.present
+          ? data.modelVersion.value
+          : this.modelVersion,
     );
   }
 
@@ -381,7 +418,8 @@ class UserRow extends DataClass implements Insertable<UserRow> {
           ..write('imagePath: $imagePath, ')
           ..write('enrolledAt: $enrolledAt, ')
           ..write('lastVerifiedAt: $lastVerifiedAt, ')
-          ..write('templateMeta: $templateMeta')
+          ..write('templateMeta: $templateMeta, ')
+          ..write('modelVersion: $modelVersion')
           ..write(')'))
         .toString();
   }
@@ -396,6 +434,7 @@ class UserRow extends DataClass implements Insertable<UserRow> {
     enrolledAt,
     lastVerifiedAt,
     $driftBlobEquality.hash(templateMeta),
+    modelVersion,
   );
   @override
   bool operator ==(Object other) =>
@@ -408,7 +447,8 @@ class UserRow extends DataClass implements Insertable<UserRow> {
           other.imagePath == this.imagePath &&
           other.enrolledAt == this.enrolledAt &&
           other.lastVerifiedAt == this.lastVerifiedAt &&
-          $driftBlobEquality.equals(other.templateMeta, this.templateMeta));
+          $driftBlobEquality.equals(other.templateMeta, this.templateMeta) &&
+          other.modelVersion == this.modelVersion);
 }
 
 class UsersCompanion extends UpdateCompanion<UserRow> {
@@ -420,6 +460,7 @@ class UsersCompanion extends UpdateCompanion<UserRow> {
   final Value<DateTime?> enrolledAt;
   final Value<DateTime?> lastVerifiedAt;
   final Value<Uint8List?> templateMeta;
+  final Value<int> modelVersion;
   final Value<int> rowid;
   const UsersCompanion({
     this.userId = const Value.absent(),
@@ -430,6 +471,7 @@ class UsersCompanion extends UpdateCompanion<UserRow> {
     this.enrolledAt = const Value.absent(),
     this.lastVerifiedAt = const Value.absent(),
     this.templateMeta = const Value.absent(),
+    this.modelVersion = const Value.absent(),
     this.rowid = const Value.absent(),
   });
   UsersCompanion.insert({
@@ -441,6 +483,7 @@ class UsersCompanion extends UpdateCompanion<UserRow> {
     this.enrolledAt = const Value.absent(),
     this.lastVerifiedAt = const Value.absent(),
     this.templateMeta = const Value.absent(),
+    this.modelVersion = const Value.absent(),
     this.rowid = const Value.absent(),
   }) : userId = Value(userId),
        name = Value(name),
@@ -454,6 +497,7 @@ class UsersCompanion extends UpdateCompanion<UserRow> {
     Expression<DateTime>? enrolledAt,
     Expression<DateTime>? lastVerifiedAt,
     Expression<Uint8List>? templateMeta,
+    Expression<int>? modelVersion,
     Expression<int>? rowid,
   }) {
     return RawValuesInsertable({
@@ -465,6 +509,7 @@ class UsersCompanion extends UpdateCompanion<UserRow> {
       if (enrolledAt != null) 'enrolled_at': enrolledAt,
       if (lastVerifiedAt != null) 'last_verified_at': lastVerifiedAt,
       if (templateMeta != null) 'template_meta': templateMeta,
+      if (modelVersion != null) 'model_version': modelVersion,
       if (rowid != null) 'rowid': rowid,
     });
   }
@@ -478,6 +523,7 @@ class UsersCompanion extends UpdateCompanion<UserRow> {
     Value<DateTime?>? enrolledAt,
     Value<DateTime?>? lastVerifiedAt,
     Value<Uint8List?>? templateMeta,
+    Value<int>? modelVersion,
     Value<int>? rowid,
   }) {
     return UsersCompanion(
@@ -489,6 +535,7 @@ class UsersCompanion extends UpdateCompanion<UserRow> {
       enrolledAt: enrolledAt ?? this.enrolledAt,
       lastVerifiedAt: lastVerifiedAt ?? this.lastVerifiedAt,
       templateMeta: templateMeta ?? this.templateMeta,
+      modelVersion: modelVersion ?? this.modelVersion,
       rowid: rowid ?? this.rowid,
     );
   }
@@ -520,6 +567,9 @@ class UsersCompanion extends UpdateCompanion<UserRow> {
     if (templateMeta.present) {
       map['template_meta'] = Variable<Uint8List>(templateMeta.value);
     }
+    if (modelVersion.present) {
+      map['model_version'] = Variable<int>(modelVersion.value);
+    }
     if (rowid.present) {
       map['rowid'] = Variable<int>(rowid.value);
     }
@@ -537,6 +587,7 @@ class UsersCompanion extends UpdateCompanion<UserRow> {
           ..write('enrolledAt: $enrolledAt, ')
           ..write('lastVerifiedAt: $lastVerifiedAt, ')
           ..write('templateMeta: $templateMeta, ')
+          ..write('modelVersion: $modelVersion, ')
           ..write('rowid: $rowid')
           ..write(')'))
         .toString();
@@ -1056,6 +1107,7 @@ typedef $$UsersTableCreateCompanionBuilder =
       Value<DateTime?> enrolledAt,
       Value<DateTime?> lastVerifiedAt,
       Value<Uint8List?> templateMeta,
+      Value<int> modelVersion,
       Value<int> rowid,
     });
 typedef $$UsersTableUpdateCompanionBuilder =
@@ -1068,6 +1120,7 @@ typedef $$UsersTableUpdateCompanionBuilder =
       Value<DateTime?> enrolledAt,
       Value<DateTime?> lastVerifiedAt,
       Value<Uint8List?> templateMeta,
+      Value<int> modelVersion,
       Value<int> rowid,
     });
 
@@ -1147,6 +1200,11 @@ class $$UsersTableFilterComposer extends Composer<_$AppDatabase, $UsersTable> {
     builder: (column) => ColumnFilters(column),
   );
 
+  ColumnFilters<int> get modelVersion => $composableBuilder(
+    column: $table.modelVersion,
+    builder: (column) => ColumnFilters(column),
+  );
+
   Expression<bool> verificationLogsRefs(
     Expression<bool> Function($$VerificationLogsTableFilterComposer f) f,
   ) {
@@ -1221,6 +1279,11 @@ class $$UsersTableOrderingComposer
     column: $table.templateMeta,
     builder: (column) => ColumnOrderings(column),
   );
+
+  ColumnOrderings<int> get modelVersion => $composableBuilder(
+    column: $table.modelVersion,
+    builder: (column) => ColumnOrderings(column),
+  );
 }
 
 class $$UsersTableAnnotationComposer
@@ -1261,6 +1324,11 @@ class $$UsersTableAnnotationComposer
 
   GeneratedColumn<Uint8List> get templateMeta => $composableBuilder(
     column: $table.templateMeta,
+    builder: (column) => column,
+  );
+
+  GeneratedColumn<int> get modelVersion => $composableBuilder(
+    column: $table.modelVersion,
     builder: (column) => column,
   );
 
@@ -1326,6 +1394,7 @@ class $$UsersTableTableManager
                 Value<DateTime?> enrolledAt = const Value.absent(),
                 Value<DateTime?> lastVerifiedAt = const Value.absent(),
                 Value<Uint8List?> templateMeta = const Value.absent(),
+                Value<int> modelVersion = const Value.absent(),
                 Value<int> rowid = const Value.absent(),
               }) => UsersCompanion(
                 userId: userId,
@@ -1336,6 +1405,7 @@ class $$UsersTableTableManager
                 enrolledAt: enrolledAt,
                 lastVerifiedAt: lastVerifiedAt,
                 templateMeta: templateMeta,
+                modelVersion: modelVersion,
                 rowid: rowid,
               ),
           createCompanionCallback:
@@ -1348,6 +1418,7 @@ class $$UsersTableTableManager
                 Value<DateTime?> enrolledAt = const Value.absent(),
                 Value<DateTime?> lastVerifiedAt = const Value.absent(),
                 Value<Uint8List?> templateMeta = const Value.absent(),
+                Value<int> modelVersion = const Value.absent(),
                 Value<int> rowid = const Value.absent(),
               }) => UsersCompanion.insert(
                 userId: userId,
@@ -1358,6 +1429,7 @@ class $$UsersTableTableManager
                 enrolledAt: enrolledAt,
                 lastVerifiedAt: lastVerifiedAt,
                 templateMeta: templateMeta,
+                modelVersion: modelVersion,
                 rowid: rowid,
               ),
           withReferenceMapper: (p0) => p0

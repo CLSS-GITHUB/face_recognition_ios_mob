@@ -26,6 +26,16 @@ class Users extends Table {
   DateTimeColumn get lastVerifiedAt => dateTime().nullable()();
   BlobColumn get templateMeta => blob().nullable()();
 
+  // v3 — face-recognition model version (FaceThresholds.modelVersion) that
+  // produced the templates stored in `faceTemplates`. Existing rows get
+  // 0 ("unknown / pre-v3"); the repo treats those as `requiresReEnroll`
+  // and excludes them from the active matching bank so old templates
+  // are never compared against a probe extracted with a different model.
+  // SQLite ALTER TABLE ADD COLUMN with a constant default (0) is safe
+  // and runs in O(1) — see app_database.dart `onUpgrade`.
+  IntColumn get modelVersion =>
+      integer().withDefault(const Constant(0))();
+
   @override
   Set<Column> get primaryKey => {userId};
 

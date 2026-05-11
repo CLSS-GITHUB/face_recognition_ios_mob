@@ -51,18 +51,31 @@ class EnrollUser {
     }
 
     if (existing != null) {
-      final isNewTemplate = existing.faceTemplates.every(
-        (t) =>
-            t.length != embedding.length ||
-            _matcher.cosine(embedding, t) <=
-                FaceThresholds.templateDedupThreshold,
-      );
-      if (!isNewTemplate) {
-        return DuplicateTemplateSkipped(existing);
+      // If the existing user was enrolled under a previous model, drop
+      // their old (incompatible) templates rather than appending a new
+      // one alongside them — mixing feature spaces in `faceTemplates`
+      // poisons the matching bank. The current embedding becomes the
+      // sole template under the current model version.
+      final isReEnrol = existing.modelVersion != FaceThresholds.modelVersion;
+      if (!isReEnrol) {
+        final isNewTemplate = existing.faceTemplates.every(
+          (t) =>
+              t.length != embedding.length ||
+              _matcher.cosine(embedding, t) <=
+                  FaceThresholds.templateDedupThreshold,
+        );
+        if (!isNewTemplate) {
+          return DuplicateTemplateSkipped(existing);
+        }
       }
       final updated = existing.copyWith(
-        faceTemplates: [...existing.faceTemplates, embedding],
+        faceTemplates: isReEnrol
+            ? <Float32List>[embedding]
+            : [...existing.faceTemplates, embedding],
         isActive: true,
+        // Stamp the current model so the row migrates out of the
+        // "needs re-enrolment" bucket on this write.
+        modelVersion: FaceThresholds.modelVersion,
       );
       await _repo.upsert(updated);
       return TemplateAddedToExisting(updated);
@@ -75,6 +88,7 @@ class EnrollUser {
       faceTemplates: [embedding],
       isActive: true,
       imagePath: imagePath,
+      modelVersion: FaceThresholds.modelVersion,
     );
     await _repo.upsert(user);
     return NewUserEnrolled(user);

@@ -1,5 +1,7 @@
 import 'dart:typed_data';
 
+import '../../../../core/constants/thresholds.dart';
+
 /// Domain entity. The Drift `UserRow` lives in the data layer; this is the
 /// shape the UI and use cases work with.
 class User {
@@ -11,6 +13,7 @@ class User {
     this.imagePath,
     this.enrolledAt,
     this.lastVerifiedAt,
+    this.modelVersion = 0,
   });
 
   final String userId;
@@ -27,6 +30,19 @@ class User {
   /// successfully verified. Updated by the VerifyUser use case.
   final DateTime? lastVerifiedAt;
 
+  /// Face-recognition model version that produced this user's stored
+  /// templates. Compared against [FaceThresholds.modelVersion] at match
+  /// time — mismatches mean the templates live in a different feature
+  /// space and must be re-captured before this user can verify again.
+  /// `0` means "unknown / legacy" (rows migrated from schema v2).
+  final int modelVersion;
+
+  /// True when the templates on this user were extracted by a model
+  /// other than the one currently bundled. The active matching bank
+  /// skips these users; the UI surfaces a re-enrol prompt instead of a
+  /// silent verify failure.
+  bool get requiresReEnroll => modelVersion != FaceThresholds.modelVersion;
+
   User copyWith({
     String? userId,
     String? name,
@@ -37,6 +53,7 @@ class User {
     bool clearEnrolledAt = false,
     DateTime? lastVerifiedAt,
     bool clearLastVerifiedAt = false,
+    int? modelVersion,
   }) {
     return User(
       userId: userId ?? this.userId,
@@ -47,6 +64,7 @@ class User {
       enrolledAt: clearEnrolledAt ? null : (enrolledAt ?? this.enrolledAt),
       lastVerifiedAt:
           clearLastVerifiedAt ? null : (lastVerifiedAt ?? this.lastVerifiedAt),
+      modelVersion: modelVersion ?? this.modelVersion,
     );
   }
 }

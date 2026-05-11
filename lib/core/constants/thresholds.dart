@@ -10,6 +10,18 @@ class FaceThresholds {
   static const int tfliteThreads = 4;
   static const double pixelMean = 127.5;
 
+  /// Identifies which face-recognition checkpoint produced a stored
+  /// template. Bumped together with [embeddingDim] / `verifyThreshold`
+  /// whenever the bundled `mobile_facenet.tflite` (or its replacement)
+  /// changes. Templates whose stored `modelVersion` does not match this
+  /// constant are excluded from the active matching bank — the
+  /// corresponding users are flagged for re-enrolment instead of being
+  /// silently compared in the wrong feature space.
+  ///
+  /// History:
+  ///   1 — original 192-D MobileFaceNet shipped with v1.0 of the app.
+  static const int modelVersion = 1;
+
   // Quality (QualityAssessor)
   static const double minBrightness = 45;
   static const double maxBrightness = 245;
