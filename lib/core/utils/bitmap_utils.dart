@@ -6,7 +6,9 @@ import 'package:image/image.dart' as img;
 import 'package:path/path.dart' as p;
 import 'package:path_provider/path_provider.dart';
 
+import '../../features/face_verification/domain/entities/face_data.dart';
 import '../constants/thresholds.dart';
+import 'image_processing.dart';
 
 /// Pure-Dart port of BitmapUtils.kt:
 /// - cropFace with 25% margin
@@ -66,6 +68,26 @@ class BitmapUtils {
       bytes: rgb.buffer,
       numChannels: 3,
       order: img.ChannelOrder.rgb,
+    );
+  }
+
+  /// Crop → align → maybe-enhance → resize 112×112 → flatten to RGB bytes.
+  /// Produces the exact byte layout `EmbeddingIsolate.extract` and
+  /// `FaceRecognitionService.extractEmbedding` consume (37,632 bytes for
+  /// the default 112×112 input). Shared between the verify and enrol
+  /// pipelines so a probe and a stored template can only diverge through
+  /// model output, never through preprocessing drift.
+  static Uint8List buildExtractorPayload(img.Image source, FaceData face) {
+    final crop = cropFace(source, face.boundingBox);
+    final aligned = ImageProcessing.alignAndMaybeEnhance(crop, face);
+    final resized = img.copyResize(
+      aligned,
+      width: FaceThresholds.inputSize,
+      height: FaceThresholds.inputSize,
+      interpolation: img.Interpolation.linear,
+    );
+    return Uint8List.fromList(
+      resized.getBytes(order: img.ChannelOrder.rgb),
     );
   }
 }

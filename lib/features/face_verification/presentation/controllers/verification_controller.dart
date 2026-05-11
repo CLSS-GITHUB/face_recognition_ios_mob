@@ -14,7 +14,6 @@ import '../../../../core/di/providers.dart';
 import '../../../../core/platform/rate_limiter.dart';
 import '../../../../core/utils/bitmap_utils.dart';
 import '../../../../core/utils/camera_image_converter.dart';
-import '../../../../core/utils/image_processing.dart';
 import '../../domain/entities/face_data.dart';
 import '../../domain/entities/liveness_step.dart';
 import '../../domain/entities/quality_result.dart';
@@ -251,7 +250,6 @@ class VerificationController extends AutoDisposeNotifier<VerificationState> {
     final frameSize = isQuarterRotated
         ? Size(rawFrameSize.height, rawFrameSize.width)
         : rawFrameSize;
-    final brightness = _approximateBrightness(raw);
 
     if (faces.length > 1) {
       state = state.copyWith(
@@ -273,6 +271,11 @@ class VerificationController extends AutoDisposeNotifier<VerificationState> {
 
     final face = faces.first;
     state = state.copyWith(faces: faces, frameSize: frameSize);
+    // Brightness is only consumed by the quality assessor, which only
+    // runs when we have exactly one detected face. Computing it before
+    // the multi-face / no-face short-circuits above wasted ~30k luma
+    // samples/sec on frames that would never use them.
+    final brightness = _approximateBrightness(raw);
 
     // Anti-spoof bookkeeping: feed every well-detected single face's bbox
     // centroid into the motion-variance ring buffer so we can decide
@@ -489,21 +492,14 @@ class VerificationController extends AutoDisposeNotifier<VerificationState> {
 
   /// Decode → crop → align/enhance → resize 112×112 → flatten to RGB bytes.
   /// Returns the 37,632-byte payload [EmbeddingExtractor] expects, or null
-  /// if the camera frame format is unsupported.
+  /// if the camera frame format is unsupported. The post-decode work is
+  /// shared with the enrolment controller via
+  /// [BitmapUtils.buildExtractorPayload] so a probe and a stored template
+  /// always go through identical preprocessing.
   static Uint8List? _buildExtractorPayload(CameraImage raw, FaceData face) {
     final image = _decodeFrame(raw);
     if (image == null) return null;
-    final crop = BitmapUtils.cropFace(image, face.boundingBox);
-    final aligned = ImageProcessing.alignAndMaybeEnhance(crop, face);
-    final resized = img.copyResize(
-      aligned,
-      width: FaceThresholds.inputSize,
-      height: FaceThresholds.inputSize,
-      interpolation: img.Interpolation.linear,
-    );
-    return Uint8List.fromList(
-      resized.getBytes(order: img.ChannelOrder.rgb),
-    );
+    return BitmapUtils.buildExtractorPayload(image, face);
   }
 
   static String _statusForReason(VerificationFailure reason) {

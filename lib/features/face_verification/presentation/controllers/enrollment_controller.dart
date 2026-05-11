@@ -287,10 +287,18 @@ class EnrollmentController extends AutoDisposeNotifier<EnrollmentState> {
             isProcessingFrame: false, status: 'Frame format unsupported');
         return;
       }
+      // Crop kept for the JPEG side-effect (saved alongside the user
+      // row). The embedding pipeline runs against an independent
+      // crop+align+resize via [BitmapUtils.buildExtractorPayload] so it
+      // stays byte-identical with the verify probe.
       final crop = BitmapUtils.cropFace(image, face.boundingBox);
-      final recognizer =
-          await ref.read(faceRecognitionServiceProvider.future);
-      final embedding = await recognizer.extractEmbedding(crop, face);
+      final payload = BitmapUtils.buildExtractorPayload(image, face);
+      // Off-UI TFLite via the long-lived embedding isolate — same path
+      // the verify flow uses. Pays the spawn cost once (provider is
+      // keepAlive) and removes the ~50 ms UI hitch the previous host-
+      // isolate FaceRecognitionService call caused at enrolment time.
+      final extractor = ref.read(embeddingExtractorProvider);
+      final embedding = await extractor.extract(payload);
       final isValid = embedding.isNotEmpty && embedding.any((v) => v != 0);
       if (isValid) {
         final imagePath = await BitmapUtils.saveJpeg(
@@ -379,10 +387,11 @@ class EnrollmentController extends AutoDisposeNotifier<EnrollmentState> {
             verificationStatus: 'Frame format unsupported');
         return;
       }
-      final crop = BitmapUtils.cropFace(image, face.boundingBox);
-      final recognizer =
-          await ref.read(faceRecognitionServiceProvider.future);
-      final verifyEmbedding = await recognizer.extractEmbedding(crop, face);
+      // Verify-after-enrol uses the same off-UI isolate path so the
+      // ~50 ms TFLite call no longer blocks the live preview.
+      final payload = BitmapUtils.buildExtractorPayload(image, face);
+      final extractor = ref.read(embeddingExtractorProvider);
+      final verifyEmbedding = await extractor.extract(payload);
       if (verifyEmbedding.isEmpty) {
         state = state.copyWith(
             isProcessingFrame: false,

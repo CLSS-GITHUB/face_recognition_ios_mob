@@ -111,63 +111,78 @@ class VerifyUser {
       );
     }
 
-    // Per-user best-similarity scan. The matcher groups all templates
-    // by their owning user before picking a winner so the runner-up gap
-    // (margin) is computed across *users*, not templates of the same
-    // user. This is what makes multi-user identification reliable.
-    final result = _matcher.findBestUser(
-      probe,
-      templates.flat,
-      templates.userOf,
-      templates.count,
-      uniqueUserCount: templates.uniqueUserCount,
-    );
+    // Defense-in-depth: zero the live probe embedding before this
+    // function returns so a memory-scraper cannot recover it from the
+    // heap after a verify attempt. Stored templates remain on disk
+    // encrypted; the in-RAM **live** embedding is the most sensitive
+    // artefact in the pipeline and is no longer needed past the match.
+    try {
+      // Per-user best-similarity scan. The matcher groups all templates
+      // by their owning user before picking a winner so the runner-up
+      // gap (margin) is computed across *users*, not templates of the
+      // same user. This is what makes multi-user identification reliable.
+      final result = _matcher.findBestUser(
+        probe,
+        templates.flat,
+        templates.userOf,
+        templates.count,
+        uniqueUserCount: templates.uniqueUserCount,
+      );
 
-    if (!result.hasResult) {
+      if (!result.hasResult) {
+        return _logAndDeny(
+          start,
+          stopwatch,
+          VerificationOutcome.denied,
+          VerificationFailure.noMatch,
+          bestSimilarity: null,
+        );
+      }
+
+      final best = result.bestSimilarity;
+      final margin = result.margin;
+      final clearsThreshold = best >= FaceThresholds.verifyThreshold;
+      final clearsMargin = margin >= FaceThresholds.verifyUserMargin;
+
+      if (clearsThreshold && clearsMargin) {
+        final user = templates.uniqueUsers[result.userIndex];
+        await _userSink.touchLastVerified(user.userId, start);
+        final latency = stopwatch.elapsedMilliseconds;
+        await _logRepo.append(
+          VerificationLog(
+            userId: user.userId,
+            at: start,
+            outcome: VerificationOutcome.granted,
+            bestSimilarity: best,
+            latencyMs: latency,
+          ),
+        );
+        return VerifyGranted(
+          user: user,
+          similarity: best,
+          latencyMs: latency,
+        );
+      }
+
+      // Either the best similarity fell short OR a runner-up user is too
+      // close — both surface as `noMatch` to the user. We still record
+      // the `best` so threshold/margin tuning has data to learn from.
       return _logAndDeny(
         start,
         stopwatch,
         VerificationOutcome.denied,
         VerificationFailure.noMatch,
-        bestSimilarity: null,
+        bestSimilarity: best,
       );
+    } finally {
+      // Cheap (~192 stores) and runs on every exit path including
+      // exceptions. The Float32List backing buffer is the same one the
+      // isolate sent over the SendPort, so this also clears the
+      // worker's last result before the next extract reuses it.
+      for (var i = 0; i < probe.length; i++) {
+        probe[i] = 0;
+      }
     }
-
-    final best = result.bestSimilarity;
-    final margin = result.margin;
-    final clearsThreshold = best >= FaceThresholds.verifyThreshold;
-    final clearsMargin = margin >= FaceThresholds.verifyUserMargin;
-
-    if (clearsThreshold && clearsMargin) {
-      final user = templates.uniqueUsers[result.userIndex];
-      await _userSink.touchLastVerified(user.userId, start);
-      final latency = stopwatch.elapsedMilliseconds;
-      await _logRepo.append(
-        VerificationLog(
-          userId: user.userId,
-          at: start,
-          outcome: VerificationOutcome.granted,
-          bestSimilarity: best,
-          latencyMs: latency,
-        ),
-      );
-      return VerifyGranted(
-        user: user,
-        similarity: best,
-        latencyMs: latency,
-      );
-    }
-
-    // Either the best similarity fell short OR a runner-up user is too
-    // close — both surface as `noMatch` to the user. We still record
-    // the `best` so threshold/margin tuning has data to learn from.
-    return _logAndDeny(
-      start,
-      stopwatch,
-      VerificationOutcome.denied,
-      VerificationFailure.noMatch,
-      bestSimilarity: best,
-    );
   }
 
   Future<VerifyDecision> _logAndDeny(
