@@ -14,6 +14,7 @@ class User {
     this.enrolledAt,
     this.lastVerifiedAt,
     this.modelVersion = 0,
+    this.lastEnrolledAt,
   });
 
   final String userId;
@@ -37,11 +38,38 @@ class User {
   /// `0` means "unknown / legacy" (rows migrated from schema v2).
   final int modelVersion;
 
-  /// True when the templates on this user were extracted by a model
-  /// other than the one currently bundled. The active matching bank
-  /// skips these users; the UI surfaces a re-enrol prompt instead of a
-  /// silent verify failure.
-  bool get requiresReEnroll => modelVersion != FaceThresholds.modelVersion;
+  /// Wall-clock at which a template was most recently added for this
+  /// user. Distinct from [enrolledAt] (fixed at row creation):
+  /// EnrollUser updates this on every save, so the freshness check in
+  /// [isStaleAsOf] keeps the bank usable for active re-enrollers and
+  /// still defeats slow drift for inactive users. `null` for rows
+  /// migrated up from schema v3; readers fall back to [enrolledAt].
+  final DateTime? lastEnrolledAt;
+
+  /// True when this user is unusable for matching as of [now], either
+  /// because their templates were produced by a different face model
+  /// (model-version mismatch) **or** because their last enrolment is
+  /// older than [FaceThresholds.templateMaxAgeDays]. Callers that need
+  /// determinism should pass an explicit clock; UI rendering uses the
+  /// [requiresReEnroll] getter for convenience.
+  bool isStaleAsOf(DateTime now) {
+    if (modelVersion != FaceThresholds.modelVersion) return true;
+    final last = lastEnrolledAt ?? enrolledAt;
+    if (last == null) {
+      // Rows with neither timestamp pre-date schema v2; their
+      // model_version is 0 so the check above already handles them.
+      // Returning false here is unreachable in practice; defensive.
+      return false;
+    }
+    final age = now.difference(last);
+    return age.inDays > FaceThresholds.templateMaxAgeDays;
+  }
+
+  /// True when the templates on this user are unusable for matching.
+  /// Fires for *both* a model-version mismatch and a template-age
+  /// exceedance — UI surfaces both via the same "Re-enroll" affordance
+  /// because the remediation is identical (re-capture).
+  bool get requiresReEnroll => isStaleAsOf(DateTime.now());
 
   User copyWith({
     String? userId,
@@ -54,6 +82,8 @@ class User {
     DateTime? lastVerifiedAt,
     bool clearLastVerifiedAt = false,
     int? modelVersion,
+    DateTime? lastEnrolledAt,
+    bool clearLastEnrolledAt = false,
   }) {
     return User(
       userId: userId ?? this.userId,
@@ -65,6 +95,9 @@ class User {
       lastVerifiedAt:
           clearLastVerifiedAt ? null : (lastVerifiedAt ?? this.lastVerifiedAt),
       modelVersion: modelVersion ?? this.modelVersion,
+      lastEnrolledAt: clearLastEnrolledAt
+          ? null
+          : (lastEnrolledAt ?? this.lastEnrolledAt),
     );
   }
 }

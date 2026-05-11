@@ -17,7 +17,7 @@ class AppDatabase extends _$AppDatabase {
       : super(executor ?? driftDatabase(name: 'face_verification_db'));
 
   @override
-  int get schemaVersion => 3;
+  int get schemaVersion => 4;
 
   @override
   MigrationStrategy get migration => MigrationStrategy(
@@ -44,6 +44,16 @@ class AppDatabase extends _$AppDatabase {
             // `requiresReEnroll == true` so the UI can prompt a one-
             // time re-capture instead of silently failing every match.
             await m.addColumn(users, users.modelVersion);
+          }
+          if (from < 4) {
+            // last_enrolled_at: nullable DateTime. Pre-v4 rows have no
+            // per-template timestamp, so the entity falls back to
+            // `enrolled_at` when reading. EnrollUser populates this on
+            // every save going forward, which is what makes the age
+            // check in User.isStaleAsOf actually defeat slow drift —
+            // a user who re-enrols stays fresh even if their original
+            // enrolledAt is years old.
+            await m.addColumn(users, users.lastEnrolledAt);
           }
         },
         // Foreign keys are off by default in SQLite. We need them on so that

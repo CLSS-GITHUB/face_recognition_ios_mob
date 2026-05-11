@@ -62,22 +62,22 @@ class UserRepositoryImpl implements UserRepository {
     final users = await getActive();
     const dim = FaceThresholds.embeddingDim;
     const perUserCap = FaceThresholds.maxTemplatesPerUserMatched;
-    const currentModel = FaceThresholds.modelVersion;
+    // Snapshot "now" once per warm so a long getActive() can't shift
+    // age verdicts mid-loop. Same value used for every isStaleAsOf
+    // check in this pass.
+    final now = DateTime.now();
 
     // First pass: count only valid templates (right-sized **and** from
-    // the current model version) and cap per user. Templates from any
-    // other model version live in a different feature space and would
-    // produce meaningless cosine scores against a fresh probe — we skip
-    // them entirely and let the UI surface a re-enrol prompt via
-    // `User.requiresReEnroll`. Newer templates win on overflow (they
-    // are at the tail of the list — EnrollUser appends).
+    // the current model version **and** still within the freshness
+    // window). Stale users — by model OR by age — contribute zero
+    // templates to the matching bank but remain visible via getActive()
+    // so the UI can prompt re-enrolment. Newer templates win on the
+    // per-user overflow cap (they are at the tail of the list —
+    // EnrollUser appends).
     var total = 0;
     final perUserUsed = <int>[];
     for (final u in users) {
-      // Stale-model users contribute zero templates to the matching
-      // bank, but still appear in repository.getActive() so the UI can
-      // show them as "needs re-enrolment".
-      if (u.modelVersion != currentModel) {
+      if (u.isStaleAsOf(now)) {
         perUserUsed.add(0);
         continue;
       }
@@ -147,6 +147,7 @@ class UserRepositoryImpl implements UserRepository {
         enrolledAt: row.enrolledAt,
         lastVerifiedAt: row.lastVerifiedAt,
         modelVersion: row.modelVersion,
+        lastEnrolledAt: row.lastEnrolledAt,
       );
     } catch (e, st) {
       _log.warning('Failed to decrypt templates for ${row.userId}', e, st);
@@ -159,6 +160,7 @@ class UserRepositoryImpl implements UserRepository {
         enrolledAt: row.enrolledAt,
         lastVerifiedAt: row.lastVerifiedAt,
         modelVersion: row.modelVersion,
+        lastEnrolledAt: row.lastEnrolledAt,
       );
     }
   }
@@ -182,6 +184,9 @@ class UserRepositoryImpl implements UserRepository {
           ? const Value.absent()
           : Value(user.lastVerifiedAt),
       modelVersion: Value(user.modelVersion),
+      lastEnrolledAt: user.lastEnrolledAt == null
+          ? const Value.absent()
+          : Value(user.lastEnrolledAt),
     );
   }
 }

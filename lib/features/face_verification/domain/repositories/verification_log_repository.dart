@@ -5,7 +5,8 @@ import '../entities/verification_log.dart';
 /// `VerificationLogDao`.
 ///
 /// Append-only: the only delete path is [purgeOlderThan], used by the
-/// 90-day retention sweep on app start.
+/// retention sweep scheduled by `verificationLogPurgeProvider` on app
+/// start. Default window: [FaceThresholds.verificationLogRetentionDays].
 abstract class VerificationLogRepository {
   Future<void> append(VerificationLog log);
 

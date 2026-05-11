@@ -82,5 +82,13 @@ void main() {
       expect(FaceThresholds.mouthOpenStepRequired, isFalse);
       expect(FaceThresholds.verifyMaxAttemptsBeforeReset, 10);
     });
+
+    test('retention & age policy', () {
+      // verification_logs cold-start sweep (R2).
+      expect(FaceThresholds.verificationLogRetentionDays, 30);
+      // Per-template freshness ceiling (R3). Beyond this the user is
+      // surfaced as requiresReEnroll == true.
+      expect(FaceThresholds.templateMaxAgeDays, 180);
+    });
   });
 }

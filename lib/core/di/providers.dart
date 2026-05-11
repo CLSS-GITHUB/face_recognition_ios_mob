@@ -2,6 +2,7 @@ import 'package:camera/camera.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:logging/logging.dart';
 
+import '../constants/thresholds.dart';
 import '../../data/database/app_database.dart';
 import '../../features/face_verification/data/adapters/dao_last_verified_sink.dart';
 import '../../features/face_verification/data/adapters/isolate_embedding_extractor.dart';
@@ -130,6 +131,33 @@ final verificationLogRepositoryProvider =
   return VerificationLogRepositoryImpl(
     ref.watch(dbProvider).verificationLogDao,
   );
+});
+
+/// Cold-start sweep of `verification_logs`. Fires once per app launch
+/// (the provider is keepAlive so subsequent `.read`s are no-ops) and
+/// drops every row older than [FaceThresholds.verificationLogRetentionDays].
+/// Bounds the local audit trail without losing the recent history the
+/// Manage Users screen displays.
+///
+/// Splash calls this fire-and-forget — a maintenance hiccup must never
+/// block routing. Errors are caught and surfaced as `0 rows purged`.
+final verificationLogPurgeProvider = FutureProvider<int>((ref) async {
+  ref.keepAlive();
+  final log = Logger('VerificationLogPurge');
+  try {
+    final repo = ref.read(verificationLogRepositoryProvider);
+    final cutoff = DateTime.now().toUtc().subtract(
+          const Duration(days: FaceThresholds.verificationLogRetentionDays),
+        );
+    final removed = await repo.purgeOlderThan(cutoff);
+    if (removed > 0) {
+      log.fine('Purged $removed verification_log rows older than $cutoff.');
+    }
+    return removed;
+  } catch (e, st) {
+    log.warning('verification_log purge failed', e, st);
+    return 0;
+  }
 });
 
 /// Persistent rate limiter for verify attempts. Secure-storage backed so

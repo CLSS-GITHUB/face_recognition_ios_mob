@@ -30,6 +30,11 @@ class EnrollUser {
   }) async {
     final trimmedId = userCode.trim();
     final trimmedName = userName.trim();
+    // Snapshot once per call so a duplicate-template-skipped path and
+    // a template-added path stamp the same wall-clock if they were to
+    // race (they can't here — single-threaded — but it keeps log
+    // semantics explicit).
+    final now = DateTime.now().toUtc();
 
     final all = await _repo.getAll();
     User? existing;
@@ -76,6 +81,11 @@ class EnrollUser {
         // Stamp the current model so the row migrates out of the
         // "needs re-enrolment" bucket on this write.
         modelVersion: FaceThresholds.modelVersion,
+        // Refresh the per-template-age clock. Even users with a very
+        // old `enrolledAt` get a fresh `lastEnrolledAt` here, which is
+        // what keeps active re-enrollers from drifting into the
+        // templateMaxAgeDays bucket between captures.
+        lastEnrolledAt: now,
       );
       await _repo.upsert(updated);
       return TemplateAddedToExisting(updated);
@@ -89,6 +99,10 @@ class EnrollUser {
       isActive: true,
       imagePath: imagePath,
       modelVersion: FaceThresholds.modelVersion,
+      // First-time enrolment also stamps lastEnrolledAt so the
+      // freshness clock starts now (not at `enrolledAt`, which is what
+      // Drift's clientDefault would otherwise lazy-set on insert).
+      lastEnrolledAt: now,
     );
     await _repo.upsert(user);
     return NewUserEnrolled(user);

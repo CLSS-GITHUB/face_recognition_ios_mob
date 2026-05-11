@@ -131,4 +131,17 @@ class FaceThresholds {
   /// the controller fully resets the camera + isolate to recover from a
   /// stuck state.
   static const int verifyMaxAttemptsBeforeReset = 10;
+
+  /// `verification_logs` retention window. Rows with `at < now - this` are
+  /// deleted on every cold start (fire-and-forget, see
+  /// `verificationLogPurgeProvider`). Keeps the local audit trail bounded
+  /// without losing the recent history Manage Users displays.
+  static const int verificationLogRetentionDays = 30;
+
+  /// Maximum age, in days, that a stored face template is considered
+  /// "fresh" for matching. Beyond this the owning user falls into the
+  /// re-enrolment bucket (same UI surface as a model-version mismatch).
+  /// Defeats slow drift: a face captured two years ago will diverge from
+  /// the same person today even with no model change.
+  static const int templateMaxAgeDays = 180;
 }

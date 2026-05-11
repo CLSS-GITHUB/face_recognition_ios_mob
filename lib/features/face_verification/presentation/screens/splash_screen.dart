@@ -17,7 +17,13 @@ class _SplashScreenState extends ConsumerState<SplashScreen> {
   @override
   void initState() {
     super.initState();
-    WidgetsBinding.instance.addPostFrameCallback((_) => _route());
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      // Cold-start maintenance: drop verification_log rows older than
+      // FaceThresholds.verificationLogRetentionDays. Fire-and-forget —
+      // routing must never wait on the sweep.
+      ref.read(verificationLogPurgeProvider.future).ignore();
+      _route();
+    });
   }
 
   Future<void> _route() async {

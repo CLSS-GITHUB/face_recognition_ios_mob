@@ -39,6 +39,9 @@ void main() {
         // templates. Pre-v3 rows default to 0 (= "legacy / unknown",
         // surfaces in the domain layer as User.requiresReEnroll).
         'model_version',
+        // v4 — per-template-age timestamp; nullable, with the entity
+        // falling back to enrolled_at for rows migrated from v3.
+        'last_enrolled_at',
       ]));
 
       // Original v1 row is still there.
@@ -154,6 +157,34 @@ void main() {
       );
       final inserted = await db.userDao.getUserById('U-new');
       expect(inserted!.modelVersion, 1);
+    });
+
+    test(
+        'v4 last_enrolled_at: NULL for migrated rows, settable for new rows',
+        () async {
+      final db = AppDatabase(_v1MemoryExecutor());
+      addTearDown(db.close);
+
+      // Pre-v4 row has no per-template timestamp; nullable column
+      // remains NULL on migration. The domain entity falls back to
+      // `enrolledAt` for these.
+      final legacy = await db.userDao.getUserById('U1');
+      expect(legacy!.lastEnrolledAt, isNull,
+          reason: 'Pre-v4 rows must migrate with last_enrolled_at = NULL.');
+
+      // New inserts can set the timestamp through the companion.
+      final stamp = DateTime.utc(2026, 5, 11, 9, 30);
+      await db.userDao.insertUser(
+        UsersCompanion.insert(
+          userId: 'U-fresh',
+          name: 'Dana',
+          faceTemplates: Uint8List.fromList(<int>[0]),
+          lastEnrolledAt: Value(stamp),
+        ),
+      );
+      final inserted = await db.userDao.getUserById('U-fresh');
+      expect(inserted!.lastEnrolledAt, isNotNull);
+      expect(inserted.lastEnrolledAt!.isAtSameMomentAs(stamp), isTrue);
     });
 
     test('purgeOlderThan deletes only old log rows', () async {

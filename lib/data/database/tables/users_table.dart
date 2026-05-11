@@ -36,6 +36,15 @@ class Users extends Table {
   IntColumn get modelVersion =>
       integer().withDefault(const Constant(0))();
 
+  // v4 — wall-clock at which a template was most recently captured for
+  // this user. Distinct from `enrolledAt` (which is fixed at row
+  // creation): EnrollUser updates `lastEnrolledAt` on every save, so
+  // the freshness check in the repository / domain entity defeats slow
+  // drift even for users who re-enrol periodically. Nullable for rows
+  // migrated up from v3; the entity falls back to `enrolledAt` when
+  // null. See FaceThresholds.templateMaxAgeDays.
+  DateTimeColumn get lastEnrolledAt => dateTime().nullable()();
+
   @override
   Set<Column> get primaryKey => {userId};
 
