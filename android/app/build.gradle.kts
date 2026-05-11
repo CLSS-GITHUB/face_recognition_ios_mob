@@ -35,6 +35,19 @@ android {
             // TODO: Add your own signing config for the release build.
             // Signing with the debug keys for now, so `flutter run --release` works.
             signingConfig = signingConfigs.getByName("debug")
+            // R8 full mode (AGP 8 default) treats tflite_flutter's
+            // compile-time reference to the optional GPU delegate as a
+            // fatal "missing class" error. The keep / dontwarn rules in
+            // proguard-rules.pro silence that and preserve every TFLite
+            // / ML Kit native binding. AGP's getDefaultProguardFile
+            // contributes Android's baseline rules so we only need our
+            // own deltas on top.
+            isMinifyEnabled = true
+            isShrinkResources = true
+            proguardFiles(
+                getDefaultProguardFile("proguard-android-optimize.txt"),
+                "proguard-rules.pro",
+            )
         }
     }
 }
