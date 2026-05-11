@@ -4,6 +4,7 @@ import 'package:go_router/go_router.dart';
 
 import '../core/di/providers.dart';
 import '../features/face_verification/presentation/screens/debug_camera_screen.dart';
+import '../features/face_verification/presentation/screens/debug_health_screen.dart';
 import '../features/face_verification/presentation/screens/enroll_form_screen.dart';
 import '../features/face_verification/presentation/screens/home_screen.dart';
 import '../features/face_verification/presentation/screens/live_enrollment_screen.dart';
@@ -71,6 +72,16 @@ final routerProvider = Provider<GoRouter>((ref) {
         GoRoute(
           path: '/debug',
           builder: (_, _) => const DebugCameraScreen(),
+          routes: [
+            // /debug/health — R5 health page. Snapshot of DB/isolate/
+            // permission/security/thresholds/recent-logs for in-field
+            // diagnostics. Gated together with /debug under kDebugMode
+            // so it never compiles into a release build.
+            GoRoute(
+              path: 'health',
+              builder: (_, _) => const DebugHealthScreen(),
+            ),
+          ],
         ),
     ],
   );
