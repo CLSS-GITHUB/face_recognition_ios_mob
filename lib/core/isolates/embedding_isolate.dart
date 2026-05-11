@@ -127,9 +127,16 @@ class EmbeddingIsolate {
     }
     final _IsolateReady readyMsg = initial as _IsolateReady;
     // Surface the selection result on cold-start. Field operators reading
-    // `/debug/health` get the same value, but the log line is what shows
-    // up in `logcat` without a UI round-trip.
-    _log.info('EmbeddingIsolate ready (delegate=${readyMsg.delegateLabel})');
+    // `/debug/health` get the same value, but this line is what shows up
+    // in `logcat` (and the IDE console) without a UI round-trip.
+    //
+    // Bypasses both `_log.info` (project's `package:logger` routes via
+    // `developer.log`, which only reaches DevTools — never logcat) and
+    // `debugPrint` (Flutter throttles to 12 KB/s; the verify
+    // controller's per-frame trace already saturates that on a busy
+    // run, swallowing this one-shot line).
+    // ignore: avoid_print
+    print('[EmbeddingIsolate] ready (delegate=${readyMsg.delegateLabel})');
 
     final responsePort = ReceivePort();
     readyMsg.workerPort.send(_HelloMessage(responsePort.sendPort));
