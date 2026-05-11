@@ -103,6 +103,15 @@ class HomeScreen extends ConsumerWidget {
                     icon: const Icon(Icons.bug_report_outlined),
                     label: const Text('Phase 2 debug harness'),
                   ),
+                  // Navigation entry for the R5 diagnostics page. The
+                  // route itself stays gated by kDebugMode in router.dart
+                  // so this button — and the page it pushes to — never
+                  // compile into a release build.
+                  TextButton.icon(
+                    onPressed: () => context.push('/debug/health'),
+                    icon: const Icon(Icons.health_and_safety_outlined),
+                    label: const Text('Pipeline health'),
+                  ),
                 ],
                 const SizedBox(height: 48),
               ],
