@@ -46,7 +46,11 @@ class VerifyUser {
         _matcher = matcher,
         _userSink = userSink,
         _logRepo = logRepo,
-        _clock = clock ?? DateTime.now;
+        // Default to UTC so verification_log rows + lastVerifiedAt
+        // round-trip through Drift's epoch-seconds storage with a
+        // consistent timezone basis. Tests inject explicit UTC clocks
+        // already; this aligns the production default with that contract.
+        _clock = clock ?? (() => DateTime.now().toUtc());
 
   final EmbeddingExtractor _extractor;
   final FaceMatchingService _matcher;

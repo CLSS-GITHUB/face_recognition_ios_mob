@@ -102,7 +102,12 @@ class DebugRecentLog {
   final int latencyMs;
 
   Map<String, Object?> toJson() => <String, Object?>{
-        'at': at.toIso8601String(),
+        // Drift's epoch-seconds round-trip drops the original timezone,
+        // so [at] comes back as a local-zone DateTime even though
+        // production writes go through UTC. Normalise to UTC here so
+        // the exported JSON is unambiguously comparable to the
+        // collectedAt UTC stamp at the top of the report.
+        'at': at.toUtc().toIso8601String(),
         'outcome': outcome,
         'userId': userId,
         'failureReason': failureReason,
@@ -339,7 +344,12 @@ class _ReportBody extends StatelessWidget {
                     Padding(
                       padding: const EdgeInsets.only(bottom: 8),
                       child: Text(
-                        '${log.at.toIso8601String()}  '
+                        // `.toUtc()` keeps each row's timestamp in the
+                        // same timezone basis as the `Collected At
+                        // (UTC)` field at the top of the report — Drift
+                        // would otherwise render a UTC-stored moment
+                        // back as a local-zone string with no Z suffix.
+                        '${log.at.toUtc().toIso8601String()}  '
                         '${log.outcome.padRight(8)}  '
                         'user=${log.userId ?? "—"}  '
                         'sim=${log.bestSimilarity?.toStringAsFixed(3) ?? "—"}  '

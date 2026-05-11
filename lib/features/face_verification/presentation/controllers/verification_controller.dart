@@ -551,7 +551,11 @@ class VerificationController extends AutoDisposeNotifier<VerificationState> {
   }
 
   Future<void> _runMatch(CameraImage raw, FaceData face) async {
-    final attemptStart = DateTime.now();
+    // UTC matches the use case's default clock so the verify-log
+    // timestamps remain timezone-consistent regardless of where the
+    // attempt timestamp originates (this controller's spoof short-
+    // circuit vs. VerifyUser's clock).
+    final attemptStart = DateTime.now().toUtc();
     final attemptStopwatch = Stopwatch()..start();
     state = state.copyWith(isVerifying: true, status: 'Matching Identity...');
     try {
@@ -685,7 +689,10 @@ class VerificationController extends AutoDisposeNotifier<VerificationState> {
     DateTime? start,
     int latencyMs = 0,
   }) async {
-    final at = start ?? DateTime.now();
+    // UTC fallback so spoof denials match the timezone basis of grants
+    // / regular denials. `start`, when provided, is already UTC because
+    // it originates from `_runMatch.attemptStart`.
+    final at = start ?? DateTime.now().toUtc();
     final logRepo = ref.read(verificationLogRepositoryProvider);
     final rl = ref.read(rateLimiterProvider);
 
