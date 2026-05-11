@@ -126,6 +126,10 @@ class EmbeddingIsolate {
       throw EmbeddingIsolateUnavailableError(initial.reason);
     }
     final _IsolateReady readyMsg = initial as _IsolateReady;
+    // Surface the selection result on cold-start. Field operators reading
+    // `/debug/health` get the same value, but the log line is what shows
+    // up in `logcat` without a UI round-trip.
+    _log.info('EmbeddingIsolate ready (delegate=${readyMsg.delegateLabel})');
 
     final responsePort = ReceivePort();
     readyMsg.workerPort.send(_HelloMessage(responsePort.sendPort));
