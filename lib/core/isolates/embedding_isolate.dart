@@ -1,6 +1,5 @@
 import 'dart:async';
 import 'dart:isolate';
-import 'dart:math';
 import 'dart:typed_data';
 
 import 'package:flutter/foundation.dart' show visibleForTesting;
@@ -10,6 +9,7 @@ import 'package:tflite_flutter/tflite_flutter.dart';
 
 import '../constants/thresholds.dart';
 import '../error/failures.dart';
+import '../utils/embedding_sanity.dart';
 
 const String _modelAsset = 'assets/models/mobile_facenet.tflite';
 
@@ -395,8 +395,14 @@ Float32List _runTfliteInto(
   interp.run(input, output);
   // The output list is reused; copy the bytes off into a fresh Float32List
   // so the host receives an independent payload (the next extract would
-  // otherwise mutate the slot underneath it).
-  return _l2(Float32List.fromList(output[0]));
+  // otherwise mutate the slot underneath it). EmbeddingSanity throws on
+  // NaN/Inf/degenerate-magnitude — those reach the host as
+  // EmbeddingFailedError and the verify-log records `extractionFailed`,
+  // not a regular `noMatch` (which a silent zero-cosine fallback would
+  // have masked).
+  return EmbeddingSanity.sanitizeAndNormalize(
+    Float32List.fromList(output[0]),
+  );
 }
 
 /// Deterministic stub embedder for unit tests. Sums the input bytes into 192
@@ -409,19 +415,5 @@ Float32List _stubEmbed(Uint8List rgb) {
   for (var i = 0; i < rgb.length; i++) {
     acc[i % dim] += rgb[i].toDouble();
   }
-  return _l2(acc);
-}
-
-Float32List _l2(Float32List v) {
-  var sumSq = 0.0;
-  for (var i = 0; i < v.length; i++) {
-    sumSq += v[i] * v[i];
-  }
-  final norm = sqrt(sumSq);
-  if (norm < 1e-6) return v;
-  final out = Float32List(v.length);
-  for (var i = 0; i < v.length; i++) {
-    out[i] = v[i] / norm;
-  }
-  return out;
+  return EmbeddingSanity.sanitizeAndNormalize(acc);
 }
