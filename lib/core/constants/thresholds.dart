@@ -153,4 +153,15 @@ class FaceThresholds {
   /// [replayMotionMaxStdPx]: the *upper* bound that still counts as
   /// "no motion".
   static const double replayDeviceMotionMaxStd = 0.05;
+
+  /// Minimum variance-of-Laplacian over the 112×112 RGB extractor payload
+  /// below which the verify / enrol pipelines treat the frame as motion-
+  /// blurred and short-circuit before the embedding extractor runs.
+  /// Calibrated against the in-tree MobileFaceNet probe: sharp natural
+  /// faces score ~200–800, lightly handheld frames ~80–200, visibly
+  /// motion-blurred frames < 60. Lower bound matters more than upper
+  /// bound — a too-strict floor over-rejects in dim light, a too-loose
+  /// floor lets blurry frames drag the cosine into the noisy band
+  /// between `verifyThreshold` (0.75) and `duplicateFaceThreshold` (0.85).
+  static const double minBlurVariance = 60;
 }

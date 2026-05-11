@@ -17,6 +17,7 @@ import '../../../../core/constants/thresholds.dart';
 import '../../../../core/di/providers.dart';
 import '../../../../core/platform/rate_limiter.dart';
 import '../../../../core/utils/bitmap_utils.dart';
+import '../../../../core/utils/blur_metric.dart';
 import '../../../../core/utils/camera_image_converter.dart';
 import '../../domain/entities/face_data.dart';
 import '../../domain/entities/liveness_step.dart';
@@ -575,6 +576,24 @@ class VerificationController extends AutoDisposeNotifier<VerificationState> {
           start: attemptStart,
           latencyMs: attemptStopwatch.elapsedMilliseconds,
         );
+        return;
+      }
+
+      // Sharpness gate (Phase B): reject motion-blurred frames before the
+      // ~30 ms embedding-isolate dispatch. A blurred probe drives a
+      // numerically valid 192-D vector through MobileFaceNet but its
+      // cosine to the user's enrolled template drops into the noisy band
+      // — far better to surface a "hold steady" hint than a generic
+      // match failure. Threshold is calibrated in FaceThresholds.
+      final blur = BlurMetric.varianceOfLaplacian(
+        rgb112,
+        FaceThresholds.inputSize,
+        FaceThresholds.inputSize,
+      );
+      if (blur < FaceThresholds.minBlurVariance) {
+        _log.fine('Blur gate: variance=$blur below floor — holding.');
+        state = state.copyWith(
+            isVerifying: false, status: 'Hold steady — frame is blurry');
         return;
       }
 

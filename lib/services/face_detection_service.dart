@@ -8,12 +8,15 @@ import '../features/face_verification/domain/entities/face_data.dart';
 class FaceDetectionService {
   FaceDetectionService({FaceDetectorOptions? options})
       : _detector = FaceDetector(
+          // `enableContours` was historically on, but no code path in this
+          // tree consumes `face.contours` — it cost ~3 ms / frame on the
+          // ML Kit side for output we never read. The OcclusionDetector
+          // uses the 4-landmark coverage signal, not the contour ring.
           options: options ??
               FaceDetectorOptions(
                 performanceMode: FaceDetectorMode.fast,
                 enableLandmarks: true,
                 enableClassification: true,
-                enableContours: true,
                 enableTracking: true,
                 minFaceSize: 0.10,
               ),

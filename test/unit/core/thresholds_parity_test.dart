@@ -98,5 +98,13 @@ void main() {
       // the static-device replay scenario.
       expect(FaceThresholds.replayDeviceMotionMaxStd, 0.05);
     });
+
+    test('blur floor (Phase B)', () {
+      // Variance-of-Laplacian floor on the 112×112 RGB extractor payload.
+      // Raise only with a measured handheld-frame distribution — too
+      // strict over-rejects in dim light; too loose lets blurry probes
+      // drag the cosine into the verify-margin band.
+      expect(FaceThresholds.minBlurVariance, 60);
+    });
   });
 }

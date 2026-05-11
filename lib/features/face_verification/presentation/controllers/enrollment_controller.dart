@@ -12,6 +12,7 @@ import 'package:uuid/uuid.dart';
 import '../../../../core/constants/thresholds.dart';
 import '../../../../core/di/providers.dart';
 import '../../../../core/utils/bitmap_utils.dart';
+import '../../../../core/utils/blur_metric.dart';
 import '../../../../core/utils/camera_image_converter.dart';
 import '../../domain/entities/enrollment_result.dart';
 import '../../domain/entities/enrollment_stage.dart';
@@ -293,6 +294,22 @@ class EnrollmentController extends AutoDisposeNotifier<EnrollmentState> {
       // stays byte-identical with the verify probe.
       final crop = BitmapUtils.cropFace(image, face.boundingBox);
       final payload = BitmapUtils.buildExtractorPayload(image, face);
+      // Sharpness gate (Phase B): keep the retry FSM spinning until the
+      // capture frame is sharp enough that the embedding won't drift in
+      // the noisy band — far better than baking a blurry template into
+      // the user row, which would then poison every subsequent verify.
+      final blur = BlurMetric.varianceOfLaplacian(
+        payload,
+        FaceThresholds.inputSize,
+        FaceThresholds.inputSize,
+      );
+      if (blur < FaceThresholds.minBlurVariance) {
+        _log.fine('Enrol blur gate: variance=$blur below floor — holding.');
+        state = state.copyWith(
+            isProcessingFrame: false,
+            status: 'Hold steady — frame is blurry');
+        return;
+      }
       // Off-UI TFLite via the long-lived embedding isolate — same path
       // the verify flow uses. Pays the spawn cost once (provider is
       // keepAlive) and removes the ~50 ms UI hitch the previous host-
@@ -390,6 +407,21 @@ class EnrollmentController extends AutoDisposeNotifier<EnrollmentState> {
       // Verify-after-enrol uses the same off-UI isolate path so the
       // ~50 ms TFLite call no longer blocks the live preview.
       final payload = BitmapUtils.buildExtractorPayload(image, face);
+      // Same sharpness floor as the verify controller — a blurry verify
+      // probe against a sharp enrolled template is the exact case the
+      // gate was designed for.
+      final blur = BlurMetric.varianceOfLaplacian(
+        payload,
+        FaceThresholds.inputSize,
+        FaceThresholds.inputSize,
+      );
+      if (blur < FaceThresholds.minBlurVariance) {
+        _log.fine('Verify-stage blur gate: variance=$blur — holding.');
+        state = state.copyWith(
+            isProcessingFrame: false,
+            verificationStatus: 'Hold steady — frame is blurry');
+        return;
+      }
       final extractor = ref.read(embeddingExtractorProvider);
       final verifyEmbedding = await extractor.extract(payload);
       if (verifyEmbedding.isEmpty) {

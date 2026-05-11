@@ -325,12 +325,14 @@ Recommended additions:
 4. Surface "second capture pending" UI hint in user management.
 5. Add unit tests for `FaceTemplateMetaCodec` and the dual-template enrol path.
 
-### Phase B — FaceMesh integration (≈ 6 hrs)
-1. Add `google_mlkit_face_mesh_detection` to pubspec.
-2. Extend `FaceDetectionService` (or sibling) to emit 468-point mesh alongside the 12-point bbox.
-3. Implement Laplacian-variance blur metric on the eye sub-region.
-4. Quality assessor reads the blur metric and rejects frames below the floor.
-5. Drop `enableContours` from the ML Kit detector (unused).
+### Phase B — Sharpness gate + ML Kit trim (shipped, FaceMesh deferred)
+1. ~~Add `google_mlkit_face_mesh_detection` to pubspec.~~ **Deferred.** Package is iOS-preview (open question §14.3), adds ~30 MB to APK, and ~doubles per-frame ML Kit cost. The Laplacian blur signal we actually wanted only needs the 4 ML Kit landmarks we already have, so the dependency would buy nothing today.
+2. ~~Extend `FaceDetectionService` to emit 468-point mesh~~ — deferred with item 1.
+3. ✅ Implement Laplacian-variance blur metric — `lib/core/utils/blur_metric.dart`, computed on the 112×112 RGB extractor payload (same buffer the screen-reflection gate already inspects, no new coord-space transforms).
+4. ✅ Gate wired into `_runMatch` (verify) and both payload-build sites in the enrol controller. Floor is `FaceThresholds.minBlurVariance = 60` — calibrated on the in-tree MobileFaceNet probe (sharp faces 200–800, blurry < 60).
+5. ✅ Dropped `enableContours: true` from the ML Kit detector — no consumer in tree, ~3 ms / frame back.
+
+Future re-entry for FaceMesh would be motivated by *additional* signals beyond blur — e.g. a dedicated glasses-frame classifier reading the eye-region mesh. Track separately.
 
 ### Phase C — ArcFace MobileFaceNet swap (≈ 4 hrs, blocked on checkpoint provenance)
 1. Drop the new `.tflite` into `assets/models/`.
@@ -342,7 +344,7 @@ Recommended additions:
 2. Move crop+align+resize into the embedding isolate.
 3. Recalibrate latency expectations.
 
-Phases A and B are independent and can ship before C / D.
+Phases A and B (sharpness gate variant) have shipped. Phases C and D are independent of each other and can land in either order.
 
 ---
 
