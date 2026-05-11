@@ -90,5 +90,13 @@ void main() {
       // surfaced as requiresReEnroll == true.
       expect(FaceThresholds.templateMaxAgeDays, 180);
     });
+
+    test('device-motion anti-spoof floor (L3)', () {
+      // Above the raw IMU noise floor (~0.01 m/s²), below normal
+      // handheld tremor (~0.05–0.3 m/s²). Loosen below 0.05 only with
+      // a fresh device benchmark — it directly trades FAR for FRR on
+      // the static-device replay scenario.
+      expect(FaceThresholds.replayDeviceMotionMaxStd, 0.05);
+    });
   });
 }

@@ -35,6 +35,12 @@ dependencies:
   permission_handler: ^11.3.1
   safe_device: ^1.1.10
 
+  # IMU access for the device-motion anti-spoof gate (architecture
+  # §7.x): a perfectly still accelerometer over a 1-second window means
+  # the phone is on a tripod, likely playing back a video. Stacks with
+  # the face-bbox motion + screen-reflection gates we already ship.
+  sensors_plus: ^6.0.0
+
   # Crypto / encrypted key storage
   flutter_secure_storage: ^9.2.2
   cryptography: ^2.7.0

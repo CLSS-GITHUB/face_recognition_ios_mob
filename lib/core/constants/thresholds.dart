@@ -144,4 +144,13 @@ class FaceThresholds {
   /// Defeats slow drift: a face captured two years ago will diverge from
   /// the same person today even with no model change.
   static const int templateMaxAgeDays = 180;
+
+  /// Maximum acceleration-magnitude std-dev (m/s²) over the device-
+  /// motion rolling buffer below which the device is treated as
+  /// stationary — typical for a phone-on-tripod replay. Calibrated
+  /// above the raw IMU noise floor (~0.01 m/s²) and below the band of
+  /// normal handheld tremor (~0.05–0.3 m/s²). Same semantic as
+  /// [replayMotionMaxStdPx]: the *upper* bound that still counts as
+  /// "no motion".
+  static const double replayDeviceMotionMaxStd = 0.05;
 }

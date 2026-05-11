@@ -11,6 +11,7 @@ import 'package:google_mlkit_face_detection/google_mlkit_face_detection.dart'
     show FaceLandmarkType;
 import 'package:image/image.dart' as img;
 import 'package:logging/logging.dart';
+import 'package:sensors_plus/sensors_plus.dart';
 
 import '../../../../core/constants/thresholds.dart';
 import '../../../../core/di/providers.dart';
@@ -21,6 +22,7 @@ import '../../domain/entities/face_data.dart';
 import '../../domain/entities/liveness_step.dart';
 import '../../domain/entities/quality_result.dart';
 import '../../domain/entities/user.dart';
+import '../../../../services/device_motion_detector.dart';
 import '../../../../services/motion_variance_detector.dart';
 import '../../../../services/screen_reflection_detector.dart';
 import '../../domain/entities/verification_failure.dart';
@@ -148,6 +150,16 @@ class VerificationController extends AutoDisposeNotifier<VerificationState> {
   /// frame-locked face means a printed photo / static screen — see §7.2.
   final MotionVarianceDetector _motion = MotionVarianceDetector();
 
+  /// Anti-spoof: tracks device-accelerometer magnitude over the last ~1s.
+  /// A phone on a tripod showing a recorded video passes face-bbox
+  /// motion checks (the face *inside* the video moves) but reads near-
+  /// zero variance here — that's the signal we deny on.
+  final DeviceMotionDetector _deviceMotion = DeviceMotionDetector();
+
+  /// Subscription to the accelerometer stream, cancelled on dispose
+  /// so we don't leak between Verify Identity screen entries.
+  StreamSubscription<AccelerometerEvent>? _accelSub;
+
   /// Anti-spoof: cheap saturation+luma heuristic on the 112×112 RGB crop
   /// — phone-on-phone replay produces unnaturally vivid + bright pixels.
   /// Stateless; see §7.3.
@@ -178,7 +190,31 @@ class VerificationController extends AutoDisposeNotifier<VerificationState> {
       _disposed = true;
       _staleFrameWatchdog?.cancel();
       _staleFrameWatchdog = null;
+      _accelSub?.cancel();
+      _accelSub = null;
     });
+    // Subscribe to the accelerometer at ~50 Hz so a 50-sample ring
+    // buffer covers ~1 second of device motion. Errors on the stream
+    // (no IMU, transient driver failure) silently leave the buffer
+    // empty — isStatic() then never fires, which is the conservative
+    // default. We don't want a missing sensor to *cause* a denial.
+    try {
+      _accelSub = accelerometerEventStream(
+        samplingPeriod: const Duration(milliseconds: 20),
+      ).listen(
+        (event) {
+          if (_disposed) return;
+          _deviceMotion.record(event.x, event.y, event.z);
+        },
+        onError: (Object e, StackTrace st) {
+          _log.warning('Accelerometer stream error', e, st);
+        },
+      );
+    } catch (e, st) {
+      // Some platforms / emulators throw on the call itself. Same
+      // "fail open" behaviour as a stream error.
+      _log.warning('Failed to subscribe to accelerometer stream', e, st);
+    }
     Future.microtask(_warmTemplates);
     return VerificationState.initial(challenge: _pickChallenge());
   }
@@ -211,6 +247,7 @@ class VerificationController extends AutoDisposeNotifier<VerificationState> {
     _log.warning('Camera frame stalled for '
         '${FaceThresholds.frameStaleMs} ms — soft reset.');
     _motion.reset();
+    _deviceMotion.reset();
     _resetChallengeProgress();
     state = state.copyWith(
       livenessPassed: false,
@@ -362,6 +399,18 @@ class VerificationController extends AutoDisposeNotifier<VerificationState> {
     // circuit before the embedding step.
     if (_motion.isStatic()) {
       _log.warning('Spoof: motion variance below floor — denying.');
+      await _denyForSpoof();
+      return;
+    }
+
+    // Anti-spoof gate (L3): device accelerometer also shows no motion.
+    // Stacks with the face-bbox gate above: face-bbox stillness catches
+    // printed-photo replays, device stillness catches phone-on-tripod
+    // *video* replays where the face inside the video does move. The
+    // fail-open behaviour (no IMU samples → buffer not full → returns
+    // false) keeps us conservative on emulators / sensorless devices.
+    if (_deviceMotion.isStatic()) {
+      _log.warning('Spoof: device motion variance below floor — denying.');
       await _denyForSpoof();
       return;
     }
@@ -599,9 +648,12 @@ class VerificationController extends AutoDisposeNotifier<VerificationState> {
   }
 
   void dismissResult() {
-    // Anti-spoof: reset the motion buffer so a previous static-frame
-    // verdict doesn't leak into the next attempt's first second.
+    // Anti-spoof: reset both motion buffers so a previous static-frame
+    // verdict (face or device) doesn't leak into the next attempt's
+    // first second. The accelerometer subscription stays alive — the
+    // detector buffer fills again as new samples flow in.
     _motion.reset();
+    _deviceMotion.reset();
     _resetChallengeProgress();
     // Pick a fresh challenge so an attacker who saw the prior prompt
     // can't pre-record the next one. The pick is uniform with
