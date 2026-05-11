@@ -11,6 +11,14 @@ import 'package:logging/logging.dart';
 /// is the canonical surface, and audio is a bonus.
 abstract class TtsAnnouncer {
   Future<void> speak(String text);
+
+  /// Wake the underlying TTS engine without producing audible output.
+  /// Called when the verify screen first mounts so the first real
+  /// `speak()` after a granted match doesn't pay the engine cold-start
+  /// cost (~50 ms on most Android builds, more on a cold boot).
+  /// Best-effort — same swallow-and-log contract as [speak].
+  Future<void> prewarm();
+
   Future<void> dispose();
 }
 
@@ -41,6 +49,9 @@ class FlutterTtsAnnouncer implements TtsAnnouncer {
       _initialised = true; // give up; don't retry every speak
     }
   }
+
+  @override
+  Future<void> prewarm() => _ensureInitialised();
 
   @override
   Future<void> speak(String text) async {

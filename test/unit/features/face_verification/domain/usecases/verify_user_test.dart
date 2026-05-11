@@ -412,4 +412,73 @@ void main() {
     final denied = await useCaseFail.call(rgb112: _frame(), templates: bank);
     expect(denied.latencyMs, greaterThanOrEqualTo(0));
   });
+
+  group('O-5 fast path: pre-extracted embedding', () {
+    test('skips extractor.extract entirely when embedding is supplied',
+        () async {
+      // If the use case touches the extractor when `embedding` is set we
+      // would silently regress the latency win. The fake's `calls`
+      // counter is the canary.
+      final probe = _eFor(0);
+      final extractor = _FakeExtractor.returns(_eFor(99))
+        ..calls = 0; // sanity-reset the counter
+      final useCase = VerifyUser(
+        extractor: extractor,
+        matcher: matcher,
+        userSink: sink,
+        logRepo: logRepo,
+        clock: () => DateTime.utc(2026, 5, 11, 12),
+      );
+      final bank = _bank(<(User, Float32List)>[(_user('U1'), _eFor(0))]);
+
+      final decision =
+          await useCase.call(embedding: probe, templates: bank);
+      expect(decision, isA<VerifyGranted>());
+      expect(extractor.calls, 0,
+          reason: 'fast path must not call the extractor');
+    });
+
+    test('fast-path probe is zeroed after the call (defense-in-depth)',
+        () async {
+      // The use case's `finally` block zeroes the probe regardless of
+      // whether it came from the extractor or the caller. The
+      // controller relies on this — losing it would leak a live
+      // embedding past the match.
+      final probe = _eFor(0);
+      final useCase = VerifyUser(
+        extractor: _FakeExtractor.returns(_eFor(99)),
+        matcher: matcher,
+        userSink: sink,
+        logRepo: logRepo,
+      );
+      final bank = _bank(<(User, Float32List)>[(_user('U1'), _eFor(0))]);
+      await useCase.call(embedding: probe, templates: bank);
+      expect(probe.every((v) => v == 0), isTrue,
+          reason: 'caller-supplied embedding must be wiped on return');
+    });
+
+    test('asserts exactly one of rgb112 / embedding is provided', () {
+      final useCase = VerifyUser(
+        extractor: _FakeExtractor.returns(_eFor(0)),
+        matcher: matcher,
+        userSink: sink,
+        logRepo: logRepo,
+      );
+      final bank = _bank(<(User, Float32List)>[(_user('U1'), _eFor(0))]);
+      // Both null → asserts in debug.
+      expect(
+        () => useCase.call(templates: bank),
+        throwsA(isA<AssertionError>()),
+      );
+      // Both present → asserts in debug.
+      expect(
+        () => useCase.call(
+          rgb112: _frame(),
+          embedding: _eFor(0),
+          templates: bank,
+        ),
+        throwsA(isA<AssertionError>()),
+      );
+    });
+  });
 }

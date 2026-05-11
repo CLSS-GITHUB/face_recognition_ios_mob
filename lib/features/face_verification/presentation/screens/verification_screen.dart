@@ -1,8 +1,11 @@
+import 'dart:async';
+
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:go_router/go_router.dart';
 
 import '../../../../app/theme/colors.dart';
+import '../../../../core/di/providers.dart';
 import '../../domain/entities/liveness_step.dart';
 import '../controllers/verification_controller.dart';
 import '../dialogs/verification_result_dialog.dart';
@@ -31,6 +34,16 @@ class VerificationScreen extends ConsumerStatefulWidget {
 
 class _VerificationScreenState extends ConsumerState<VerificationScreen> {
   bool _resultDialogOpen = false;
+
+  @override
+  void initState() {
+    super.initState();
+    // O-6: wake the TTS engine while the user is still doing the
+    // liveness challenge. The first speak() on Android pays a one-shot
+    // ~50 ms engine init; doing it now keeps the granted-result
+    // announcement instant. Best-effort — failure here changes nothing.
+    unawaited(ref.read(ttsAnnouncerProvider).prewarm());
+  }
 
   @override
   Widget build(BuildContext context) {

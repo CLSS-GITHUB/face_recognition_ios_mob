@@ -182,6 +182,27 @@ class VerificationController extends AutoDisposeNotifier<VerificationState> {
   /// return near centre before advancing into the match phase.
   bool _turnReached = false;
 
+  /// O-5: speculative pre-extract cache. During liveness we run a
+  /// best-effort prepare + extract on stable good frames so that when
+  /// the challenge finally passes, the match step has a probe in hand
+  /// and can skip the ~45 ms isolate round-trip. Single-shot: consumed
+  /// (and nulled) by `_runMatch` on the next match.
+  ///
+  /// Security: the same defense-in-depth probe-zeroing that VerifyUser
+  /// applies on its `finally` block runs whether the embedding came
+  /// from this cache or from the slow-path extract. The cache is also
+  /// cleared on every challenge-progress reset (replay attempt, stale
+  /// frame, dialog dismissal) so a stale probe never crosses
+  /// attempt boundaries.
+  ({Float32List embedding, DateTime at})? _speculativeProbe;
+
+  /// Re-entrancy guard for [_maybeSpeculate]. The embedding isolate is
+  /// single-flight (queue length 1); if a speculation is in flight, we
+  /// must not kick off another one — and if `_runMatch` raced ahead and
+  /// is about to use the isolate, the speculation we'd start would
+  /// throw `EmbeddingBusyError`. Either way: skip.
+  bool _inSpeculation = false;
+
   @override
   VerificationState build() {
     ref.onDispose(() {
@@ -190,6 +211,7 @@ class VerificationController extends AutoDisposeNotifier<VerificationState> {
       _staleFrameWatchdog = null;
       _accelSub?.cancel();
       _accelSub = null;
+      _clearSpeculativeProbe();
     });
     // Subscribe to the accelerometer at ~50 Hz so a 50-sample ring
     // buffer covers ~1 second of device motion. Errors on the stream
@@ -247,6 +269,7 @@ class VerificationController extends AutoDisposeNotifier<VerificationState> {
     _motion.reset();
     _deviceMotion.reset();
     _resetChallengeProgress();
+    _clearSpeculativeProbe();
     state = state.copyWith(
       livenessPassed: false,
       isBlinking: false,
@@ -388,6 +411,13 @@ class VerificationController extends AutoDisposeNotifier<VerificationState> {
     if (!quality.isGood) return;
 
     if (!state.livenessPassed) {
+      // O-5: while the user is still completing the liveness challenge,
+      // speculatively prepare + extract a probe on this good frame so
+      // the match step has it cached when the challenge passes.
+      // Fire-and-forget — failures (busy isolate, bad frame, screen-refl,
+      // blur) are silently dropped; the slow path in `_runMatch` will
+      // recompute if no cached probe is fresh by then.
+      unawaited(_maybeSpeculate(raw, face));
       _handleChallenge(face);
       return;
     }
@@ -548,30 +578,42 @@ class VerificationController extends AutoDisposeNotifier<VerificationState> {
     return ratio;
   }
 
-  Future<void> _runMatch(CameraImage raw, FaceData face) async {
-    // UTC matches the use case's default clock so the verify-log
-    // timestamps remain timezone-consistent regardless of where the
-    // attempt timestamp originates (this controller's spoof short-
-    // circuit vs. VerifyUser's clock).
-    final attemptStart = DateTime.now().toUtc();
-    final attemptStopwatch = Stopwatch()..start();
-    state = state.copyWith(isVerifying: true, status: 'Matching Identity...');
+  /// Defense-in-depth: zero the cached speculative probe's bytes and
+  /// null the reference. Called from every attempt-boundary path
+  /// (stale frame, dialog dismissal, controller dispose) so a probe
+  /// never crosses an attempt that the user did not intend.
+  void _clearSpeculativeProbe() {
+    final c = _speculativeProbe;
+    if (c == null) return;
+    for (var i = 0; i < c.embedding.length; i++) {
+      c.embedding[i] = 0;
+    }
+    _speculativeProbe = null;
+  }
+
+  /// O-5: best-effort speculative prepare + extract during the liveness
+  /// phase. Runs the same gates as `_runMatch`'s slow path so a cached
+  /// probe is always from a frame that *would have* passed match-time
+  /// validation. Any failure silently abandons — there is always the
+  /// slow path in `_runMatch` to fall back to.
+  Future<void> _maybeSpeculate(CameraImage raw, FaceData face) async {
+    if (_inSpeculation) return;
+    // Don't trample a fresh cached probe — the embedding isolate is
+    // single-flight and the match path may be racing us right now.
+    final existing = _speculativeProbe;
+    if (existing != null &&
+        DateTime.now().difference(existing.at).inMilliseconds < 400) {
+      return;
+    }
+    _inSpeculation = true;
     try {
       final format = _rawFrameFormat(raw);
-      if (format == null) {
-        state = state.copyWith(
-            isVerifying: false, status: 'Frame format unsupported');
-        return;
-      }
-      // Phase D: decode + crop + eye-align + resize runs on the embedding
-      // isolate so the UI thread stays free to repaint the preview during
-      // a verify. Wall-clock latency is unchanged; the win is purely UI
-      // smoothness. The host-side gates below still run on the prepared
-      // 112×112 buffer so their status copy and error paths stay intact.
+      if (format == null) return;
       final leftEye = face.landmarks[FaceLandmarkType.leftEye];
       final rightEye = face.landmarks[FaceLandmarkType.rightEye];
       final extractor = ref.read(embeddingExtractorProvider);
-      late final Uint8List rgb112;
+
+      Uint8List rgb112;
       try {
         rgb112 = await extractor.prepare(
           rawBytes: raw.planes.first.bytes,
@@ -584,42 +626,126 @@ class VerificationController extends AutoDisposeNotifier<VerificationState> {
           rightEyeX: rightEye?.x,
           rightEyeY: rightEye?.y,
         );
-      } catch (e, st) {
-        _log.warning('Frame preparation failed', e, st);
-        state = state.copyWith(
-            isVerifying: false, status: 'Frame format unsupported');
-        return;
+      } catch (_) {
+        return; // includes EmbeddingBusyError — the match path won the race
       }
       if (_disposed) return;
 
-      // Anti-spoof gate (§7.3): cheap saturation/luma check on the same
-      // crop the embedding extractor would consume. Phone-on-phone replay
-      // typically lights up here.
-      if (_screenReflection.isLikelyScreen(rgb112)) {
-        _log.warning('Spoof: screen reflection signal — denying.');
-        await _denyForSpoof(
-          start: attemptStart,
-          latencyMs: attemptStopwatch.elapsedMilliseconds,
-        );
-        return;
-      }
-
-      // Sharpness gate (Phase B): reject motion-blurred frames before the
-      // ~30 ms embedding-isolate dispatch. A blurred probe drives a
-      // numerically valid 192-D vector through MobileFaceNet but its
-      // cosine to the user's enrolled template drops into the noisy band
-      // — far better to surface a "hold steady" hint than a generic
-      // match failure. Threshold is calibrated in FaceThresholds.
+      // Mirror _runMatch's host-side gates. We treat their failures as
+      // "this frame isn't a good speculation candidate" — not as denies
+      // or spoof flags. The slow path will re-evaluate on its own frame.
+      if (_screenReflection.isLikelyScreen(rgb112)) return;
       final blur = BlurMetric.varianceOfLaplacian(
         rgb112,
         FaceThresholds.inputSize,
         FaceThresholds.inputSize,
       );
-      if (blur < FaceThresholds.minBlurVariance) {
-        _log.fine('Blur gate: variance=$blur below floor — holding.');
-        state = state.copyWith(
-            isVerifying: false, status: 'Hold steady — frame is blurry');
+      if (blur < FaceThresholds.minBlurVariance) return;
+
+      Float32List embedding;
+      try {
+        embedding = await extractor.extract(rgb112);
+      } catch (_) {
         return;
+      }
+      if (_disposed) return;
+
+      _speculativeProbe = (embedding: embedding, at: DateTime.now());
+    } finally {
+      _inSpeculation = false;
+    }
+  }
+
+  Future<void> _runMatch(CameraImage raw, FaceData face) async {
+    // UTC matches the use case's default clock so the verify-log
+    // timestamps remain timezone-consistent regardless of where the
+    // attempt timestamp originates (this controller's spoof short-
+    // circuit vs. VerifyUser's clock).
+    final attemptStart = DateTime.now().toUtc();
+    final attemptStopwatch = Stopwatch()..start();
+    state = state.copyWith(isVerifying: true, status: 'Matching Identity...');
+    try {
+      // O-5 fast path: if speculation cached a probe during liveness on
+      // a frame that already cleared screen-refl + blur, reuse it now —
+      // saves the ~15 ms prepare + ~30 ms extract round-trip and skips
+      // straight to rate-limit + match. The cache TTL (500 ms) is short
+      // enough that the probe still reflects the user actively in front
+      // of the camera, not a stale frame from earlier in the session.
+      final cached = _speculativeProbe;
+      final cacheAgeMs = cached == null
+          ? -1
+          : DateTime.now().difference(cached.at).inMilliseconds;
+      final canUseCache = cached != null && cacheAgeMs < 500;
+
+      Uint8List? rgb112;
+      Float32List? speculativeEmbedding;
+
+      if (canUseCache) {
+        speculativeEmbedding = cached.embedding;
+        _speculativeProbe = null;
+        _log.fine('Using speculative probe (age=${cacheAgeMs}ms)');
+      } else {
+        final format = _rawFrameFormat(raw);
+        if (format == null) {
+          state = state.copyWith(
+              isVerifying: false, status: 'Frame format unsupported');
+          return;
+        }
+        // Phase D: decode + crop + eye-align + resize runs on the embedding
+        // isolate so the UI thread stays free to repaint the preview
+        // during a verify. The host-side gates below still run on the
+        // prepared 112×112 buffer so their status copy and error paths
+        // stay intact.
+        final leftEye = face.landmarks[FaceLandmarkType.leftEye];
+        final rightEye = face.landmarks[FaceLandmarkType.rightEye];
+        final extractor = ref.read(embeddingExtractorProvider);
+        try {
+          rgb112 = await extractor.prepare(
+            rawBytes: raw.planes.first.bytes,
+            width: raw.width,
+            height: raw.height,
+            format: format,
+            bbox: face.boundingBox,
+            leftEyeX: leftEye?.x,
+            leftEyeY: leftEye?.y,
+            rightEyeX: rightEye?.x,
+            rightEyeY: rightEye?.y,
+          );
+        } catch (e, st) {
+          _log.warning('Frame preparation failed', e, st);
+          state = state.copyWith(
+              isVerifying: false, status: 'Frame format unsupported');
+          return;
+        }
+        if (_disposed) return;
+
+        // Anti-spoof gate (§7.3): cheap saturation/luma check on the same
+        // crop the embedding extractor would consume. Phone-on-phone
+        // replay typically lights up here. (Speculation already passed
+        // this gate at cache time, so the fast path can skip it.)
+        if (_screenReflection.isLikelyScreen(rgb112)) {
+          _log.warning('Spoof: screen reflection signal — denying.');
+          await _denyForSpoof(
+            start: attemptStart,
+            latencyMs: attemptStopwatch.elapsedMilliseconds,
+          );
+          return;
+        }
+
+        // Sharpness gate (Phase B): reject motion-blurred frames before
+        // the ~30 ms embedding-isolate dispatch. (Same speculation
+        // reasoning as above.)
+        final blur = BlurMetric.varianceOfLaplacian(
+          rgb112,
+          FaceThresholds.inputSize,
+          FaceThresholds.inputSize,
+        );
+        if (blur < FaceThresholds.minBlurVariance) {
+          _log.fine('Blur gate: variance=$blur below floor — holding.');
+          state = state.copyWith(
+              isVerifying: false, status: 'Hold steady — frame is blurry');
+          return;
+        }
       }
 
       // Pre-flight rate-limit check: cheap secure-storage read; only
@@ -639,7 +765,11 @@ class VerificationController extends AutoDisposeNotifier<VerificationState> {
 
       final useCase = ref.read(verifyUserUseCaseProvider);
       final flat = state.flat ?? FlatTemplates.empty;
-      final decision = await useCase.call(rgb112: rgb112, templates: flat);
+      final decision = await useCase.call(
+        rgb112: rgb112,
+        embedding: speculativeEmbedding,
+        templates: flat,
+      );
 
       if (_disposed) return;
 
@@ -703,6 +833,7 @@ class VerificationController extends AutoDisposeNotifier<VerificationState> {
     _motion.reset();
     _deviceMotion.reset();
     _resetChallengeProgress();
+    _clearSpeculativeProbe();
     // Pick a fresh challenge so an attacker who saw the prior prompt
     // can't pre-record the next one. The pick is uniform with
     // replacement, so consecutive attempts can repeat — that's the

@@ -58,10 +58,24 @@ class VerifyUser {
   final VerificationLogRepository _logRepo;
   final DateTime Function() _clock;
 
+  /// Runs the verify pipeline. Exactly one of [rgb112] or [embedding] must
+  /// be supplied:
+  /// - [rgb112] (slow path): the use case extracts the embedding inside
+  ///   the isolate. Used when the controller has no cached probe.
+  /// - [embedding] (fast path, O-5): the caller has already extracted the
+  ///   probe via a speculative pre-extract during liveness; we skip the
+  ///   isolate round-trip and head straight to matching. The same
+  ///   defense-in-depth zeroing applies on exit so the live vector is
+  ///   wiped after the match.
   Future<VerifyDecision> call({
-    required Uint8List rgb112,
+    Uint8List? rgb112,
+    Float32List? embedding,
     required FlatTemplates templates,
   }) async {
+    assert(
+      (rgb112 == null) != (embedding == null),
+      'Provide exactly one of rgb112 or embedding',
+    );
     final start = _clock();
     final stopwatch = Stopwatch()..start();
 
@@ -87,32 +101,39 @@ class VerifyUser {
       );
     }
 
-    final Float32List probe;
-    try {
-      probe = await _extractor.extract(rgb112);
-    } on EmbeddingFailedError {
-      // Worker reported a clean inference failure (bad bytes, NaN output).
-      return _logAndDeny(
-        start,
-        stopwatch,
-        VerificationOutcome.error,
-        VerificationFailure.extractionFailed,
-        bestSimilarity: null,
-      );
-    } on Object {
-      // Anything else (busy, isolate-unavailable, runtime exception) maps
-      // to a generic `error` outcome. The adapter that satisfies
-      // [EmbeddingExtractor] is expected to translate spawn / queue
-      // exceptions into [EmbeddingFailedError] when they should be tracked
-      // separately; otherwise we record the attempt and move on without
-      // crashing the controller.
-      return _logAndDeny(
-        start,
-        stopwatch,
-        VerificationOutcome.error,
-        VerificationFailure.error,
-        bestSimilarity: null,
-      );
+    Float32List probe;
+    if (embedding != null) {
+      // Fast path — caller (controller) pre-extracted the probe during
+      // the liveness phase. The probe still lands in `finally` below so
+      // its bytes are wiped before this function returns.
+      probe = embedding;
+    } else {
+      try {
+        probe = await _extractor.extract(rgb112!);
+      } on EmbeddingFailedError {
+        // Worker reported a clean inference failure (bad bytes, NaN output).
+        return _logAndDeny(
+          start,
+          stopwatch,
+          VerificationOutcome.error,
+          VerificationFailure.extractionFailed,
+          bestSimilarity: null,
+        );
+      } on Object {
+        // Anything else (busy, isolate-unavailable, runtime exception) maps
+        // to a generic `error` outcome. The adapter that satisfies
+        // [EmbeddingExtractor] is expected to translate spawn / queue
+        // exceptions into [EmbeddingFailedError] when they should be tracked
+        // separately; otherwise we record the attempt and move on without
+        // crashing the controller.
+        return _logAndDeny(
+          start,
+          stopwatch,
+          VerificationOutcome.error,
+          VerificationFailure.error,
+          bestSimilarity: null,
+        );
+      }
     }
 
     // Defense-in-depth: zero the live probe embedding before this
