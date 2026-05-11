@@ -46,3 +46,9 @@ app.*.map.json
 
 # Claude Code local state
 .claude/settings.local.json
+
+# Local logs (never commit; they leak device IDs / PII).
+# *.log is already covered above; cover the *.txt log patterns we use.
+*_output.txt
+latest_logs.txt
+logcat*.txt
