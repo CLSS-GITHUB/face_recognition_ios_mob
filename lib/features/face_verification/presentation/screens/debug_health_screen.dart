@@ -8,6 +8,7 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 import '../../../../core/constants/thresholds.dart';
 import '../../../../core/di/providers.dart';
 import '../../../../core/platform/security_check.dart';
+import 'verification_log_csv.dart';
 
 /// Snapshot of the on-device pipeline at a moment in time. Built once
 /// per screen build (the provider is `autoDispose`) so revisiting the
@@ -275,6 +276,55 @@ class DebugHealthScreen extends ConsumerWidget {
                   duration: Duration(seconds: 2),
                 ),
               );
+            },
+          ),
+          // F-10 (instr): export every persisted verification_logs row
+          // as CSV to the clipboard. Operationalises PAD_POLICY=shadow:
+          // without this action the pad_score column is stuck in
+          // on-device SQLite, unusable for the FRR/FAR calibration
+          // study described in audit doc §9.4. Field tester taps this,
+          // pastes into Excel / pandas, runs the threshold sweep.
+          IconButton(
+            tooltip: 'Export verification logs as CSV',
+            icon: const Icon(Icons.file_download_outlined),
+            onPressed: () async {
+              final messenger = ScaffoldMessenger.of(context);
+              try {
+                final db = ref.read(dbProvider);
+                final rows = await (db.select(db.verificationLogs)
+                      ..orderBy([(t) => OrderingTerm.desc(t.at)]))
+                    .get();
+                final csv = verificationLogsToCsv(rows.map(
+                  (r) => VerificationLogCsvRow(
+                    at: r.at,
+                    outcome: r.outcome,
+                    userId: r.userId,
+                    failureReason: r.failureReason,
+                    bestSimilarity: r.bestSimilarity,
+                    padScore: r.padScore,
+                    latencyMs: r.latencyMs,
+                  ),
+                ));
+                await Clipboard.setData(ClipboardData(text: csv));
+                if (!context.mounted) return;
+                messenger.showSnackBar(
+                  SnackBar(
+                    content: Text(
+                      'Exported ${rows.length} verification log row'
+                      '${rows.length == 1 ? '' : 's'} to clipboard.',
+                    ),
+                    duration: const Duration(seconds: 2),
+                  ),
+                );
+              } catch (e) {
+                if (!context.mounted) return;
+                messenger.showSnackBar(
+                  SnackBar(
+                    content: Text('CSV export failed: $e'),
+                    duration: const Duration(seconds: 3),
+                  ),
+                );
+              }
             },
           ),
           IconButton(
