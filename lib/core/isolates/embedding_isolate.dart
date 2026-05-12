@@ -1,4 +1,5 @@
 import 'dart:async';
+import 'dart:io' show Platform;
 import 'dart:isolate';
 import 'dart:typed_data';
 import 'dart:ui' show Rect;
@@ -559,7 +560,7 @@ _SelectionResult _selectInterpreter(
   }
 
   // 2. CPU golden — captured on a deterministic ramp. The bytes don't
-  //    have to be face-like; we're only checking the XNNPACK output
+  //    have to be face-like; we're only checking the delegate output
   //    agrees with CPU pixel-by-pixel of the same input.
   final testBytes = _validationTestBytes();
   Float32List goldenCpu;
@@ -575,72 +576,148 @@ _SelectionResult _selectInterpreter(
     return _SelectionResult.failure('CPU golden inference failed: $e');
   }
 
-  // 3. Try XNNPACK. Any failure → keep CPU.
-  Delegate? xnn;
-  Interpreter? xnnInterp;
-  try {
-    xnn = XNNPackDelegate(
+  // 3. Try delegates in order of expected speed: GPU (Android only) →
+  //    XNNPACK → plain CPU. Each trial reuses the same CPU golden and
+  //    the cosine ≥ 0.999 gate; failures get folded into the label so
+  //    /debug/health tells the field operator which path won.
+  final failures = <String>[];
+
+  // 3a. GPU (Android only). tflite_flutter exposes GpuDelegateV2 which
+  //     wraps the OpenGL/OpenCL backend. Default options use FP32
+  //     (`isPrecisionLossAllowed: false`); we let the validation gate
+  //     reject any device whose driver flips an axis under FP16 fusion.
+  //     On iOS this path is skipped — the GPU backend there is Metal /
+  //     CoreML and routes through a different setter on
+  //     InterpreterOptions (out of scope for this commit).
+  if (Platform.isAndroid) {
+    final gpuTrial = _tryDelegate(
+      modelBytes: modelBytes,
+      goldenCpu: goldenCpu,
+      testBytes: testBytes,
+      reusableInput: reusableInput,
+      reusableOutput: reusableOutput,
+      name: 'gpu',
+      buildDelegate: () => GpuDelegateV2(),
+    );
+    if (gpuTrial.success) {
+      cpu.close();
+      return _SelectionResult.success(
+        interpreter: gpuTrial.interpreter!,
+        delegate: gpuTrial.delegate,
+        label: 'gpu',
+      );
+    }
+    failures.add(gpuTrial.failureReason!);
+  }
+
+  // 3b. XNNPACK. CPU SIMD path; well-behaved on essentially every ARM
+  //     chip. ~8–12 ms / extract win over plain CPU; no precision risk.
+  final xnnTrial = _tryDelegate(
+    modelBytes: modelBytes,
+    goldenCpu: goldenCpu,
+    testBytes: testBytes,
+    reusableInput: reusableInput,
+    reusableOutput: reusableOutput,
+    name: 'xnnpack',
+    buildDelegate: () => XNNPackDelegate(
       options: XNNPackDelegateOptions(
         numThreads: FaceThresholds.tfliteThreads,
       ),
-    );
-    final opts = InterpreterOptions()
-      ..threads = FaceThresholds.tfliteThreads
-      ..addDelegate(xnn);
-    xnnInterp = Interpreter.fromBuffer(modelBytes, options: opts);
-  } catch (e) {
-    try {
-      xnn?.delete();
-    } catch (_) {}
-    return _SelectionResult.success(
-      interpreter: cpu,
-      delegate: null,
-      label: 'cpu(xnnpack-construct-fail:$e)',
-    );
-  }
-
-  // 4. XNNPACK output check.
-  Float32List xnnEmb;
-  try {
-    xnnEmb = _runTfliteInto(
-      xnnInterp,
-      testBytes,
-      reusableInput,
-      reusableOutput,
-    );
-  } catch (e) {
-    xnnInterp.close();
-    try {
-      xnn.delete();
-    } catch (_) {}
-    return _SelectionResult.success(
-      interpreter: cpu,
-      delegate: null,
-      label: 'cpu(xnnpack-infer-fail:$e)',
-    );
-  }
-
-  final sim = _cosineL2Normalised(goldenCpu, xnnEmb);
-  if (sim >= 0.999) {
-    // XNNPACK matches CPU — keep XNNPACK, drop the validation CPU.
+    ),
+  );
+  if (xnnTrial.success) {
     cpu.close();
+    final label = failures.isEmpty
+        ? 'xnnpack'
+        : 'xnnpack(after:${failures.join('|')})';
     return _SelectionResult.success(
-      interpreter: xnnInterp,
-      delegate: xnn,
-      label: 'xnnpack',
+      interpreter: xnnTrial.interpreter!,
+      delegate: xnnTrial.delegate,
+      label: label,
     );
   }
+  failures.add(xnnTrial.failureReason!);
 
-  // Diverged. Keep CPU; report the observed similarity so /debug/health
-  // tells us exactly how far off the device's XNNPACK landed.
-  xnnInterp.close();
-  try {
-    xnn.delete();
-  } catch (_) {}
+  // 3c. Both delegates failed. Keep the validation CPU as the live
+  //     interpreter and report every failure so the field can decide
+  //     whether it's a vendor-driver issue (GPU) or a model/op-fusion
+  //     issue (XNNPACK).
   return _SelectionResult.success(
     interpreter: cpu,
     delegate: null,
-    label: 'cpu(xnnpack-validation-fail:${sim.toStringAsFixed(4)})',
+    label: 'cpu(${failures.join('|')})',
+  );
+}
+
+/// Outcome of a single delegate trial: a constructed-and-validated
+/// interpreter/delegate pair, or a structured failure reason that gets
+/// folded into the [_SelectionResult]'s label.
+class _DelegateTrialResult {
+  _DelegateTrialResult.success(this.interpreter, this.delegate)
+      : failureReason = null;
+  _DelegateTrialResult.failure(this.failureReason)
+      : interpreter = null,
+        delegate = null;
+
+  final Interpreter? interpreter;
+  final Delegate? delegate;
+  final String? failureReason;
+
+  bool get success => interpreter != null;
+}
+
+/// Builds an interpreter with [buildDelegate], runs [testBytes] through
+/// it, and compares the L2-normalised result to [goldenCpu]. Returns a
+/// success result when cosine ≥ 0.999, otherwise tears the delegate
+/// down and returns a failure with the observed similarity (or the
+/// construct-time exception). Used identically for every entry on the
+/// delegate ladder so the safety contract is uniform.
+_DelegateTrialResult _tryDelegate({
+  required Uint8List modelBytes,
+  required Float32List goldenCpu,
+  required Uint8List testBytes,
+  required List<List<List<List<double>>>> reusableInput,
+  required List<List<double>> reusableOutput,
+  required String name,
+  required Delegate Function() buildDelegate,
+}) {
+  Delegate? delegate;
+  Interpreter? interp;
+  try {
+    delegate = buildDelegate();
+    final opts = InterpreterOptions()
+      ..threads = FaceThresholds.tfliteThreads
+      ..addDelegate(delegate);
+    interp = Interpreter.fromBuffer(modelBytes, options: opts);
+  } catch (e) {
+    try {
+      delegate?.delete();
+    } catch (_) {}
+    return _DelegateTrialResult.failure('$name-construct-fail:$e');
+  }
+
+  Float32List output;
+  try {
+    output = _runTfliteInto(interp, testBytes, reusableInput, reusableOutput);
+  } catch (e) {
+    interp.close();
+    try {
+      delegate.delete();
+    } catch (_) {}
+    return _DelegateTrialResult.failure('$name-infer-fail:$e');
+  }
+
+  final sim = _cosineL2Normalised(goldenCpu, output);
+  if (sim >= 0.999) {
+    return _DelegateTrialResult.success(interp, delegate);
+  }
+
+  interp.close();
+  try {
+    delegate.delete();
+  } catch (_) {}
+  return _DelegateTrialResult.failure(
+    '$name-validation-fail:${sim.toStringAsFixed(4)}',
   );
 }
 

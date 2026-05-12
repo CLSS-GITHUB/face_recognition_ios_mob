@@ -408,7 +408,6 @@ class VerificationController extends AutoDisposeNotifier<VerificationState> {
     }
 
     final face = faces.first;
-    state = state.copyWith(faces: faces, frameSize: frameSize);
     // Brightness is only consumed by the quality assessor, which only
     // runs when we have exactly one detected face. Computing it before
     // the multi-face / no-face short-circuits above wasted ~30k luma
@@ -432,7 +431,18 @@ class VerificationController extends AutoDisposeNotifier<VerificationState> {
     final quality = assessor.assess(face, frameSize,
         currentStep: state.livenessPassed ? null : state.challenge,
         brightness: brightness);
-    state = state.copyWith(quality: quality);
+    // F-6: coalesce the faces+frameSize update with the quality update
+    // into a single `copyWith` per happy-path frame. The previous
+    // two-step (`faces+frameSize`, then later `quality`) allocated two
+    // `VerificationState` instances per frame and produced two
+    // rebuilds; merging halves that churn without changing observable
+    // behaviour — neither `_motion.recordCentroid` nor
+    // `assessor.assess` read any of the fields being deferred.
+    state = state.copyWith(
+      faces: faces,
+      frameSize: frameSize,
+      quality: quality,
+    );
     if (!quality.isGood) return;
 
     if (!state.livenessPassed) {
