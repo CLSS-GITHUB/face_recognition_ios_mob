@@ -18,6 +18,7 @@ DebugHealthReport _stubReport({bool requiresReEnroll = false}) =>
       isolateReady: true,
       isolateError: null,
       isolateDelegate: 'xnnpack',
+      padLabel: 'noop',
       cameraPermissionGranted: true,
       security: const SecurityStatus(rooted: false, emulator: false),
       thresholds: const <String, Object?>{

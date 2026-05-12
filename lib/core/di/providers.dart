@@ -8,10 +8,12 @@ import '../constants/thresholds.dart';
 import '../../data/database/app_database.dart';
 import '../../features/face_verification/data/adapters/dao_last_verified_sink.dart';
 import '../../features/face_verification/data/adapters/isolate_embedding_extractor.dart';
+import '../../features/face_verification/data/adapters/isolate_pad_classifier.dart';
 import '../../features/face_verification/data/repositories/user_repository_impl.dart';
 import '../../features/face_verification/data/repositories/verification_log_repository_impl.dart';
 import '../../features/face_verification/domain/ports/embedding_extractor.dart';
 import '../../features/face_verification/domain/ports/last_verified_sink.dart';
+import '../../features/face_verification/domain/ports/pad_classifier.dart';
 import '../../features/face_verification/domain/repositories/user_repository.dart';
 import '../../features/face_verification/domain/repositories/verification_log_repository.dart';
 import '../../features/face_verification/domain/usecases/enroll_user.dart';
@@ -22,6 +24,7 @@ import '../../services/face_recognition_service.dart';
 import '../../services/liveness_state_machine.dart';
 import '../../services/quality_assessor.dart';
 import '../isolates/embedding_isolate.dart';
+import '../isolates/pad_isolate.dart';
 import '../platform/permission_check.dart';
 import '../platform/rate_limiter.dart';
 import '../platform/security_check.dart';
@@ -135,6 +138,56 @@ final embeddingIsolateProvider = FutureProvider<EmbeddingIsolate>((ref) async {
 /// spawn future on each call — fast after the first.
 final embeddingExtractorProvider = Provider<EmbeddingExtractor>((ref) {
   return IsolateEmbeddingExtractor(ref.watch(embeddingIsolateProvider.future));
+});
+
+/// F-10 scaffold: feature flag for the passive PAD (Presentation Attack
+/// Detection) classifier. Off by default. When flipped on with
+/// `--dart-define=PAD_ENABLED=true` AND a vetted checkpoint is bundled
+/// at `assets/models/pad.tflite`, the verify controller's grant path
+/// runs the PAD score after a successful match and denies if the score
+/// exceeds `FaceThresholds.padSpoofThreshold`.
+///
+/// Without the flag set, OR if the checkpoint is missing / the isolate
+/// fails to spawn, `padClassifierProvider` resolves to
+/// `NoOpPadClassifier` — the verify pipeline behaves exactly as it did
+/// pre-PAD-scaffold. See `docs/verification/ultra_fast_verification_analysis.md`
+/// §9.4 for the security-model rationale.
+const bool kPadEnabled =
+    bool.fromEnvironment('PAD_ENABLED', defaultValue: false);
+
+/// Resolves the [PadClassifier] used by the verify controller. Falls
+/// through three layers in order:
+///
+/// 1. If [kPadEnabled] is false → [NoOpPadClassifier]. No isolate spawn
+///    attempted. Telemetry label: `noop`.
+/// 2. Flag on, isolate spawn succeeds → [IsolatePadClassifier] backed
+///    by the bundled model. Telemetry label carries the model name.
+/// 3. Flag on but spawn fails (checkpoint missing, etc.) → fall back to
+///    [NoOpPadClassifier]. Telemetry label: `unavailable` so
+///    `/debug/health` shows the field operator that PAD isn't really
+///    running.
+final padClassifierProvider = Provider<PadClassifier>((ref) {
+  if (!kPadEnabled) {
+    return const NoOpPadClassifier();
+  }
+  final spawnFuture = PadIsolate.spawn();
+  ref.onDispose(() async {
+    try {
+      final iso = await spawnFuture;
+      await iso.close();
+    } catch (_) {
+      // Spawn failed; nothing to close.
+    }
+  });
+  // The adapter awaits the spawn on every classify call. If spawn
+  // ultimately fails the first call rethrows `PadUnavailableError`,
+  // which the verify controller catches and treats as "no PAD vote".
+  // Label is captured lazily — until the spawn future resolves we
+  // report `pad: pending`.
+  return IsolatePadClassifier(
+    spawnFuture,
+    label: 'isolate(pending)',
+  );
 });
 
 /// Adapts the existing UserDao.touchLastVerified to the small domain port.

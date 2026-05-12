@@ -24,6 +24,7 @@ class DebugHealthReport {
     required this.isolateReady,
     required this.isolateError,
     required this.isolateDelegate,
+    required this.padLabel,
     required this.cameraPermissionGranted,
     required this.security,
     required this.thresholds,
@@ -51,6 +52,13 @@ class DebugHealthReport {
   /// row reads as "spawning…" in concert with [isolateReady]).
   /// See [EmbeddingIsolate.delegateLabel] for the format.
   final String? isolateDelegate;
+
+  /// F-10 scaffold: identifier of the PAD (Presentation Attack
+  /// Detection) classifier currently wired. Stable values:
+  /// `"noop"` when PAD_ENABLED is off OR the spawn fell back;
+  /// `"isolate(pending)"` while the PAD isolate is still spawning;
+  /// `"isolate(<model-fingerprint>)"` once it's live.
+  final String padLabel;
 
   final bool cameraPermissionGranted;
   final SecurityStatus security;
@@ -80,6 +88,9 @@ class DebugHealthReport {
           'ready': isolateReady,
           'error': isolateError,
           'delegate': isolateDelegate,
+        },
+        'pad': <String, Object?>{
+          'classifier': padLabel,
         },
         'cameraPermissionGranted': cameraPermissionGranted,
         'security': <String, bool>{
@@ -205,6 +216,7 @@ final debugHealthReportProvider =
     isolateReady: isolateReady,
     isolateError: isolateError,
     isolateDelegate: isolateDelegate,
+    padLabel: ref.watch(padClassifierProvider).label,
     cameraPermissionGranted: cameraGranted,
     security: security,
     thresholds: _thresholdsSnapshot(),
@@ -327,6 +339,7 @@ class _ReportBody extends StatelessWidget {
               },
             ),
             _kv('TFLite delegate', report.isolateDelegate ?? 'spawning…'),
+            _kv('PAD classifier', report.padLabel),
             if (report.isolateError != null)
               _kv('Error', report.isolateError!),
           ],

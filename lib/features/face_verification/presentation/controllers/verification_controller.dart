@@ -189,13 +189,22 @@ class VerificationController extends AutoDisposeNotifier<VerificationState> {
   /// and can skip the ~45 ms isolate round-trip. Single-shot: consumed
   /// (and nulled) by `_runMatch` on the next match.
   ///
+  /// F-10: the cache also carries the PAD spoof score for the same
+  /// frame. PAD must run on the *same* frame as the embedding to be
+  /// meaningful — otherwise an attacker could present a real face
+  /// during speculation and a spoof during the live blink. The
+  /// speculation captures both in one call and the fast path uses the
+  /// cached score; the slow path runs PAD on the live frame instead.
+  /// When PAD is unavailable (NoOp, no checkpoint, or isolate spawn
+  /// failed) the score is 0.0 — never vetoes.
+  ///
   /// Security: the same defense-in-depth probe-zeroing that VerifyUser
   /// applies on its `finally` block runs whether the embedding came
   /// from this cache or from the slow-path extract. The cache is also
   /// cleared on every challenge-progress reset (replay attempt, stale
   /// frame, dialog dismissal) so a stale probe never crosses
   /// attempt boundaries.
-  ({Float32List embedding, DateTime at})? _speculativeProbe;
+  ({Float32List embedding, double padScore, DateTime at})? _speculativeProbe;
 
   /// Re-entrancy guard for [_maybeSpeculate]. The embedding isolate is
   /// single-flight (queue length 1); if a speculation is in flight, we
@@ -687,7 +696,26 @@ class VerificationController extends AutoDisposeNotifier<VerificationState> {
       }
       if (_disposed) return;
 
-      _speculativeProbe = (embedding: embedding, at: DateTime.now());
+      // F-10: capture the PAD score for the SAME frame as the
+      // embedding. Sequential here (small overhead with NoOp; ~10–20 ms
+      // with a real model on a separate isolate) — when calibration
+      // demands it, switch to parallel via `Future.wait`. PAD failure
+      // is non-fatal: fall through with score 0 so PAD has no veto on
+      // this attempt. The existing anti-spoof stack still applies.
+      final padClassifier = ref.read(padClassifierProvider);
+      double padScore;
+      try {
+        padScore = await padClassifier.classify(rgb112);
+      } catch (_) {
+        padScore = 0.0;
+      }
+      if (_disposed) return;
+
+      _speculativeProbe = (
+        embedding: embedding,
+        padScore: padScore,
+        at: DateTime.now(),
+      );
     } finally {
       _inSpeculation = false;
       _speculationCompleter = null;
@@ -733,11 +761,18 @@ class VerificationController extends AutoDisposeNotifier<VerificationState> {
 
       Uint8List? rgb112;
       Float32List? speculativeEmbedding;
+      // F-10: PAD score for the frame being verified. Fast path reads
+      // it from the speculation cache; slow path computes it from the
+      // live frame after prep + gates pass. Default 0 = "no veto".
+      double padScore = 0.0;
 
       if (canUseCache) {
         speculativeEmbedding = cached.embedding;
+        padScore = cached.padScore;
         _speculativeProbe = null;
-        _log.fine('Using speculative probe (age=${cacheAgeMs}ms)');
+        _log.fine(
+          'Using speculative probe (age=${cacheAgeMs}ms, pad=$padScore)',
+        );
       } else {
         final format = _rawFrameFormat(raw);
         if (format == null) {
@@ -810,6 +845,21 @@ class VerificationController extends AutoDisposeNotifier<VerificationState> {
               isVerifying: false, status: 'Hold steady — frame is blurry');
           return;
         }
+
+        // F-10 slow-path PAD: run the passive spoof classifier on the
+        // same prepared frame the embedding will be extracted from. The
+        // verdict is consumed below where the use-case decision is
+        // adjudicated — a high score on a granted match downgrades to
+        // a spoof denial. Failure is non-fatal: PAD has no vote, the
+        // existing anti-spoof stack still applies.
+        final padClassifier = ref.read(padClassifierProvider);
+        try {
+          padScore = await padClassifier.classify(rgb112);
+        } catch (e) {
+          _log.fine('PAD classify failed on slow path: $e');
+          padScore = 0.0;
+        }
+        if (_disposed) return;
       }
 
       // Pre-flight rate-limit check: cheap secure-storage read; only
@@ -838,6 +888,22 @@ class VerificationController extends AutoDisposeNotifier<VerificationState> {
       if (_disposed) return;
 
       if (decision is VerifyGranted) {
+        // F-10: stacked PAD veto. A high spoof score downgrades the
+        // grant to a spoof denial — PAD never lets a user in that the
+        // existing pipeline would have denied; it only ever takes one
+        // away. NoOp returns 0.0 so this branch is dead when no real
+        // checkpoint is bundled, preserving today's behaviour.
+        if (padScore > FaceThresholds.padSpoofThreshold) {
+          _log.warning(
+            'PAD veto: spoof score=$padScore exceeds threshold '
+            '${FaceThresholds.padSpoofThreshold}; downgrading grant to spoof.',
+          );
+          await _denyForSpoof(
+            start: attemptStart,
+            latencyMs: attemptStopwatch.elapsedMilliseconds,
+          );
+          return;
+        }
         await rl.reset();
         state = state.copyWith(
           matchedUser: decision.user,

@@ -164,4 +164,17 @@ class FaceThresholds {
   /// floor lets blurry frames drag the cosine into the noisy band
   /// between `verifyThreshold` (0.75) and `duplicateFaceThreshold` (0.85).
   static const double minBlurVariance = 60;
+
+  /// F-10 (PAD scaffold): spoof-score threshold above which a passive
+  /// PAD verdict vetoes an otherwise-granted match. Scoring convention
+  /// is `0.0` (real) → `1.0` (spoof); `0.5` is the default-neutral
+  /// placeholder pending the calibration study described in
+  /// `docs/verification/ultra_fast_verification_analysis.md` §9.4.
+  ///
+  /// **Do not treat this as production-tuned.** The real value depends
+  /// on the bundled checkpoint and the deployment population (PAD
+  /// models exhibit demographic FRR variance). Re-tune once a real
+  /// `assets/models/pad.tflite` is in place and field FRR/FAR has been
+  /// measured.
+  static const double padSpoofThreshold = 0.5;
 }

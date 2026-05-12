@@ -106,5 +106,12 @@ void main() {
       // drag the cosine into the verify-margin band.
       expect(FaceThresholds.minBlurVariance, 60);
     });
+
+    test('PAD spoof threshold scaffold (F-10)', () {
+      // 0.5 is the default-neutral placeholder. Re-tune ONLY after a
+      // real PAD checkpoint is bundled AND a calibration study has
+      // measured FAR/FRR on the deployment population.
+      expect(FaceThresholds.padSpoofThreshold, 0.5);
+    });
   });
 }

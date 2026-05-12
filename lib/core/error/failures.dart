@@ -43,3 +43,12 @@ class EmbeddingBusyError extends FaceServiceError {
   const EmbeddingBusyError()
       : super('Embedding isolate is busy with a previous extract');
 }
+
+/// PAD (Presentation Attack Detection) inference failed or the PAD
+/// pipeline is unavailable (no checkpoint bundled, isolate spawn
+/// errored). The controller treats this as a soft failure — the active
+/// liveness gates and existing anti-spoof stack still apply, so the
+/// fall-through is to deny PAD's veto vote, not to reject the user.
+class PadUnavailableError extends FaceServiceError {
+  const PadUnavailableError(super.message);
+}
