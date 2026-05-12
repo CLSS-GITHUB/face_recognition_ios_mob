@@ -401,7 +401,7 @@ final cameraControllerProvider =
 /// camera frame is visible quickly after the user taps "Verify Identity"
 /// (architecture §6.1: target ≤ 700 ms on Pixel 6).
 ///
-/// Four tasks run in parallel:
+/// Five tasks run in parallel:
 ///   1. `availableCameras()` — caches the camera list inside the camera
 ///      plugin so `cameraControllerProvider` doesn't re-query the OS.
 ///   2. **F-1: `cameraControllerProvider`** — pays the ~250-500 ms
@@ -412,6 +412,11 @@ final cameraControllerProvider =
 ///      hit the now-warm in-memory bank cheaply.
 ///   4. `embeddingIsolateProvider.future` — pays the ~80 ms isolate spawn
 ///      cost (model load + Interpreter.fromBuffer) up-front.
+///   5. **O-7: `FaceDetectionService.prewarm()`** — forces ML Kit's
+///      native face-detection blob to cold-load (~100-300 ms on first
+///      app launch) during the route transition. Without this, the very
+///      first frame's `processImage` call eats that latency just as the
+///      user's preview goes live.
 ///
 /// `keepAlive` so calling it twice is idempotent: the home-screen tap
 /// fires it, and the verify screen re-reads it during boot — both resolve
@@ -450,6 +455,13 @@ final verifyPrewarmProvider = FutureProvider<void>((ref) async {
         await ref.read(embeddingIsolateProvider.future);
       } catch (e, st) {
         log.warning('embedding isolate prewarm failed', e, st);
+      }
+    }(),
+    () async {
+      try {
+        await ref.read(faceDetectionServiceProvider).prewarm();
+      } catch (e, st) {
+        log.warning('face detector prewarm failed', e, st);
       }
     }(),
   ]);
