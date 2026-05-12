@@ -5,6 +5,7 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:logging/logging.dart';
 
 import '../constants/thresholds.dart';
+import '../diagnostics/latency_tracker.dart';
 import '../../data/database/app_database.dart';
 import '../../features/face_verification/data/adapters/dao_last_verified_sink.dart';
 import '../../features/face_verification/data/adapters/isolate_embedding_extractor.dart';
@@ -37,6 +38,14 @@ final dbProvider = Provider<AppDatabase>((ref) {
   ref.onDispose(db.close);
   return db;
 });
+
+/// App-lifetime cold-path latency event log. Always on; bounded ring
+/// buffer (128 events). Surfaced on `/debug/health` so a field tester
+/// can read real timings off the screen for the prewarm + camera
+/// bootstrap sequence — turns "feels slow" into actionable numbers and
+/// lets future regressions get caught by the same surface.
+final latencyTrackerProvider =
+    Provider<LatencyTracker>((_) => LatencyTracker());
 
 final securityCheckProvider = Provider<SecurityCheck>((_) => const SecurityCheck());
 
@@ -428,41 +437,50 @@ final cameraControllerProvider =
 final verifyPrewarmProvider = FutureProvider<void>((ref) async {
   ref.keepAlive();
   final log = Logger('VerifyPrewarm');
-  await Future.wait<void>([
-    () async {
-      try {
-        await availableCameras();
-      } catch (e, st) {
-        log.warning('availableCameras prewarm failed', e, st);
-      }
-    }(),
-    () async {
-      try {
-        await ref.read(cameraControllerProvider.future);
-      } catch (e, st) {
-        log.warning('cameraController prewarm failed', e, st);
-      }
-    }(),
-    () async {
-      try {
-        await ref.read(userRepositoryProvider).activeFlatTemplates();
-      } catch (e, st) {
-        log.warning('templates prewarm failed', e, st);
-      }
-    }(),
-    () async {
-      try {
-        await ref.read(embeddingIsolateProvider.future);
-      } catch (e, st) {
-        log.warning('embedding isolate prewarm failed', e, st);
-      }
-    }(),
-    () async {
-      try {
-        await ref.read(faceDetectionServiceProvider).prewarm();
-      } catch (e, st) {
-        log.warning('face detector prewarm failed', e, st);
-      }
-    }(),
-  ]);
+  // Each sub-task is wrapped in `tracker.measure` so /debug/health
+  // shows how long each one actually takes on this device. The names
+  // are stable so a tester comparing two runs sees apples-to-apples.
+  // `tracker.measure` records the duration even when the underlying
+  // call throws — a hung prewarm task surfaces as a long failed
+  // event instead of vanishing into the log-warning catch.
+  final tracker = ref.read(latencyTrackerProvider);
+  await tracker.measure('prewarm.total', () async {
+    await Future.wait<void>([
+      tracker.measure('prewarm.availableCameras', () async {
+        try {
+          await availableCameras();
+        } catch (e, st) {
+          log.warning('availableCameras prewarm failed', e, st);
+        }
+      }),
+      tracker.measure('prewarm.cameraController', () async {
+        try {
+          await ref.read(cameraControllerProvider.future);
+        } catch (e, st) {
+          log.warning('cameraController prewarm failed', e, st);
+        }
+      }),
+      tracker.measure('prewarm.templates', () async {
+        try {
+          await ref.read(userRepositoryProvider).activeFlatTemplates();
+        } catch (e, st) {
+          log.warning('templates prewarm failed', e, st);
+        }
+      }),
+      tracker.measure('prewarm.embeddingIsolate', () async {
+        try {
+          await ref.read(embeddingIsolateProvider.future);
+        } catch (e, st) {
+          log.warning('embedding isolate prewarm failed', e, st);
+        }
+      }),
+      tracker.measure('prewarm.faceDetector', () async {
+        try {
+          await ref.read(faceDetectionServiceProvider).prewarm();
+        } catch (e, st) {
+          log.warning('face detector prewarm failed', e, st);
+        }
+      }),
+    ]);
+  });
 });

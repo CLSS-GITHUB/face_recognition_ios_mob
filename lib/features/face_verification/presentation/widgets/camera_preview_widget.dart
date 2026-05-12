@@ -55,6 +55,11 @@ class _CameraPreviewWidgetState extends ConsumerState<CameraPreviewWidget> {
   bool _busy = false;
   String? _error;
   int _diagFrames = 0;
+  // Latency instrumentation: the first onImage callback per widget
+  // instance is the "first preview frame" moment from the user's
+  // perspective. We mark it once and gate the mark so a long-running
+  // session doesn't spam the ring buffer.
+  bool _markedFirstFrame = false;
 
   /// Tracks whether THIS widget instance has started a stream on the
   /// shared controller. Two safety properties depend on this:
@@ -71,39 +76,62 @@ class _CameraPreviewWidgetState extends ConsumerState<CameraPreviewWidget> {
   }
 
   Future<void> _bootstrap() async {
-    try {
-      final controller = await ref.read(cameraControllerProvider.future);
-      if (!mounted) return;
-      // Defensive: if a previous widget left the stream running and
-      // didn't get a chance to stop it (hot restart, exception path),
-      // tear it down so our `startImageStream` doesn't double-fire.
-      if (controller.value.isStreamingImages) {
-        try {
-          await controller.stopImageStream();
-        } catch (e, st) {
-          _log.warning('Defensive stopImageStream failed', e, st);
+    // Wraps the whole bootstrap so /debug/health can read the
+    // widget-side cost — distinct from the prewarm-side cost. Useful
+    // because the prewarm may already have resolved
+    // `cameraControllerProvider.future` (instant resolve) but
+    // `startImageStream` is widget-owned and is not currently
+    // prewarmed (see commit notes on O-7).
+    final tracker = ref.read(latencyTrackerProvider);
+    await tracker.measure('camera.bootstrap', () async {
+      try {
+        final controller = await tracker.measure(
+          'camera.bootstrap.awaitController',
+          () => ref.read(cameraControllerProvider.future),
+        );
+        if (!mounted) return;
+        // Defensive: if a previous widget left the stream running and
+        // didn't get a chance to stop it (hot restart, exception path),
+        // tear it down so our `startImageStream` doesn't double-fire.
+        if (controller.value.isStreamingImages) {
+          try {
+            await controller.stopImageStream();
+          } catch (e, st) {
+            _log.warning('Defensive stopImageStream failed', e, st);
+          }
         }
+        await tracker.measure(
+          'camera.bootstrap.startImageStream',
+          () => controller.startImageStream(_onCameraImage),
+        );
+        _streamStarted = true;
+        if (!mounted) {
+          // The widget was disposed while we awaited startImageStream.
+          // Tear down what we just started — the provider keeps the
+          // controller alive for the next widget instance.
+          try {
+            await controller.stopImageStream();
+          } catch (_) {}
+          return;
+        }
+        setState(() => _controller = controller);
+      } catch (e, st) {
+        _log.severe('Camera bootstrap failed', e, st);
+        if (mounted) setState(() => _error = '$e');
       }
-      await controller.startImageStream(_onCameraImage);
-      _streamStarted = true;
-      if (!mounted) {
-        // The widget was disposed while we awaited startImageStream.
-        // Tear down what we just started — the provider keeps the
-        // controller alive for the next widget instance.
-        try {
-          await controller.stopImageStream();
-        } catch (_) {}
-        return;
-      }
-      setState(() => _controller = controller);
-    } catch (e, st) {
-      _log.severe('Camera bootstrap failed', e, st);
-      if (mounted) setState(() => _error = '$e');
-    }
+    });
   }
 
   void _onCameraImage(CameraImage image) {
     _diagFrames++;
+    if (!_markedFirstFrame) {
+      _markedFirstFrame = true;
+      // Point-in-time event; the tester reads the gap between
+      // `camera.bootstrap.startImageStream` end and this mark to see
+      // how long the driver takes to deliver pixels after the stream
+      // is requested.
+      ref.read(latencyTrackerProvider).mark('camera.firstFrame');
+    }
     if (_kPerFrameLog && (_diagFrames <= 10 || _diagFrames % 30 == 0)) {
       // ignore: avoid_print
       print('[FRAME $_diagFrames] busy=$_busy '

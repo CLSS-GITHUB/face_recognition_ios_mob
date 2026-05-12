@@ -6,6 +6,7 @@ import 'package:flutter/services.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
 import '../../../../core/constants/thresholds.dart';
+import '../../../../core/diagnostics/latency_tracker.dart';
 import '../../../../core/di/providers.dart';
 import '../../../../core/platform/security_check.dart';
 import 'verification_log_csv.dart';
@@ -328,6 +329,16 @@ class DebugHealthScreen extends ConsumerWidget {
             },
           ),
           IconButton(
+            tooltip: 'Clear latency events',
+            icon: const Icon(Icons.timer_off_outlined),
+            onPressed: () {
+              ref.read(latencyTrackerProvider).clear();
+              // The tracker isn't a Riverpod-watched value, so kick the
+              // health-report provider to repaint the latency section.
+              ref.invalidate(debugHealthReportProvider);
+            },
+          ),
+          IconButton(
             tooltip: 'Refresh',
             icon: const Icon(Icons.refresh),
             onPressed: () => ref.invalidate(debugHealthReportProvider),
@@ -345,16 +356,23 @@ class DebugHealthScreen extends ConsumerWidget {
             ),
           ),
         ),
-        data: (report) => _ReportBody(report: report),
+        data: (report) => _ReportBody(
+          report: report,
+          latencyEvents: ref.watch(latencyTrackerProvider).snapshot(),
+        ),
       ),
     );
   }
 }
 
 class _ReportBody extends StatelessWidget {
-  const _ReportBody({required this.report});
+  const _ReportBody({
+    required this.report,
+    required this.latencyEvents,
+  });
 
   final DebugHealthReport report;
+  final List<LatencyEvent> latencyEvents;
 
   @override
   Widget build(BuildContext context) {
@@ -393,6 +411,31 @@ class _ReportBody extends StatelessWidget {
             if (report.isolateError != null)
               _kv('Error', report.isolateError!),
           ],
+        ),
+        _Section(
+          title: 'Latency (cold path, newest first)',
+          children: latencyEvents.isEmpty
+              ? [
+                  const Text(
+                    '(no events yet — tap "Verify Identity" from home, '
+                    'then return here)',
+                    style: TextStyle(fontFamily: 'monospace', fontSize: 12),
+                  ),
+                ]
+              : [
+                  for (final ev in latencyEvents)
+                    Padding(
+                      padding: const EdgeInsets.only(bottom: 4),
+                      child: Text(
+                        _formatLatencyEvent(ev),
+                        style: TextStyle(
+                          fontFamily: 'monospace',
+                          fontSize: 12,
+                          color: ev.ok ? null : Theme.of(context).colorScheme.error,
+                        ),
+                      ),
+                    ),
+                ],
         ),
         _Section(
           title: 'Permissions & security',
@@ -442,6 +485,29 @@ class _ReportBody extends StatelessWidget {
         ),
       ],
     );
+  }
+
+  /// Format a single latency event for the debug section.
+  ///
+  /// `prewarm.cameraController                    312.4 ms`
+  /// `camera.firstFrame                          (mark)`
+  /// `camera.bootstrap.startImageStream          ~~ 1184.2 ms FAILED`
+  ///
+  /// Wide left column for the event name (40-char pad) keeps the
+  /// duration column aligned even with the longest name we currently
+  /// emit (`prewarm.embeddingIsolate` = 22 chars). Mark events use
+  /// `(mark)` so the tester can spot them without reading the absent
+  /// duration column. Failed `measure` events get `FAILED` so a hung
+  /// task is visually distinguishable from a slow-but-successful one.
+  static String _formatLatencyEvent(LatencyEvent ev) {
+    final paddedName = ev.name.padRight(40);
+    if (ev.durationMicros == null) {
+      return '$paddedName (mark)';
+    }
+    final ms = ev.durationMicros! / 1000.0;
+    final formattedMs = '${ms.toStringAsFixed(1)} ms'.padLeft(12);
+    final tag = ev.ok ? '' : ' FAILED';
+    return '$paddedName$formattedMs$tag';
   }
 
   Widget _kv(String k, String v) => Padding(
