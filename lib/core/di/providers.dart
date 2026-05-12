@@ -155,6 +155,50 @@ final embeddingExtractorProvider = Provider<EmbeddingExtractor>((ref) {
 const bool kPadEnabled =
     bool.fromEnvironment('PAD_ENABLED', defaultValue: false);
 
+/// Output-tensor contract for the bundled PAD checkpoint. Selected via
+/// `--dart-define=PAD_MODEL_KIND=<name>`. Accepted values match
+/// [PadModelKind] entries: `singleSigmoidScalar`, `binarySoftmax`,
+/// `silentFaceThree`. Default is `silentFaceThree`, the audit doc §9.4
+/// reference model (Silent-Face MiniFASNet). An unrecognised value
+/// falls back to the default with a warning at provider build.
+const String _kPadModelKindName = String.fromEnvironment(
+  'PAD_MODEL_KIND',
+  defaultValue: 'silentFaceThree',
+);
+
+/// Pixel normalisation applied inside the isolate. Selected via
+/// `--dart-define=PAD_PIXEL_NORM=<name>`. Accepted values match
+/// [PadNormalization] entries: `signedHalf`, `unitZeroOne`, `imagenet`.
+/// Default is `imagenet`, the Silent-Face training pipeline. An
+/// unrecognised value falls back to the default with a warning at
+/// provider build.
+const String _kPadPixelNormName = String.fromEnvironment(
+  'PAD_PIXEL_NORM',
+  defaultValue: 'imagenet',
+);
+
+PadModelKind _parsePadModelKind(String name, Logger log) {
+  for (final k in PadModelKind.values) {
+    if (k.name == name) return k;
+  }
+  log.warning(
+    'Unrecognised PAD_MODEL_KIND="$name"; falling back to silentFaceThree. '
+    'Accepted: ${PadModelKind.values.map((k) => k.name).join(', ')}',
+  );
+  return PadModelKind.silentFaceThree;
+}
+
+PadNormalization _parsePadNormalization(String name, Logger log) {
+  for (final n in PadNormalization.values) {
+    if (n.name == name) return n;
+  }
+  log.warning(
+    'Unrecognised PAD_PIXEL_NORM="$name"; falling back to imagenet. '
+    'Accepted: ${PadNormalization.values.map((n) => n.name).join(', ')}',
+  );
+  return PadNormalization.imagenet;
+}
+
 /// Resolves the [PadClassifier] used by the verify controller. Falls
 /// through three layers in order:
 ///
@@ -170,7 +214,10 @@ final padClassifierProvider = Provider<PadClassifier>((ref) {
   if (!kPadEnabled) {
     return const NoOpPadClassifier();
   }
-  final spawnFuture = PadIsolate.spawn();
+  final log = Logger('PadClassifierProvider');
+  final kind = _parsePadModelKind(_kPadModelKindName, log);
+  final norm = _parsePadNormalization(_kPadPixelNormName, log);
+  final spawnFuture = PadIsolate.spawn(kind: kind, normalization: norm);
   ref.onDispose(() async {
     try {
       final iso = await spawnFuture;
@@ -186,7 +233,7 @@ final padClassifierProvider = Provider<PadClassifier>((ref) {
   // report `pad: pending`.
   return IsolatePadClassifier(
     spawnFuture,
-    label: 'isolate(pending)',
+    label: 'isolate(pending kind=${kind.name} norm=${norm.name})',
   );
 });
 
