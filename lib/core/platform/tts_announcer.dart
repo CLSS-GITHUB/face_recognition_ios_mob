@@ -33,20 +33,42 @@ class FlutterTtsAnnouncer implements TtsAnnouncer {
 
   final FlutterTts _tts;
   final String _language;
-  bool _initialised = false;
 
-  Future<void> _ensureInitialised() async {
-    if (_initialised) return;
+  /// Cached init future. The bool-flag version of this had a race:
+  /// `prewarm()` fires from the verify screen's initState and `speak()`
+  /// fires on a granted match. If `speak()` races with an in-flight
+  /// prewarm, both observed `_initialised == false` and both fell through
+  /// into duplicate `setLanguage / setSpeechRate / setSharedInstance`
+  /// platform calls — the speak path then paid the engine cold-start
+  /// cost the prewarm was supposed to absorb, defeating O-6.
+  ///
+  /// Caching the future de-duplicates: concurrent callers await the
+  /// same single completion. Stored `Future<void>` is intentionally
+  /// `?`-typed so a failed init isn't memoised forever — the catch
+  /// inside `_doInit` converts errors into a successful void completion
+  /// (we surface failures via the log and degrade to a no-op speak).
+  Future<void>? _initFuture;
+
+  Future<void> _ensureInitialised() => _initFuture ??= _doInit();
+
+  Future<void> _doInit() async {
     try {
       await _tts.setLanguage(_language);
       // 0.5 = roughly natural; the default is jarringly fast on iOS.
       await _tts.setSpeechRate(0.5);
       // Don't queue — we want the most recent announcement only.
+      // `setSharedInstance` is iOS-only; on Android the underlying
+      // method-channel call rejects with PlatformException. Swallow.
       await _tts.setSharedInstance(true).catchError((_) => true);
-      _initialised = true;
     } catch (e, st) {
-      _log.warning('TTS init failed; subsequent speak() calls are no-ops', e, st);
-      _initialised = true; // give up; don't retry every speak
+      _log.warning(
+        'TTS init failed; subsequent speak() calls are no-ops',
+        e,
+        st,
+      );
+      // Intentionally don't rethrow — concurrent awaiters see this same
+      // resolved future and a follow-up `speak()` will hit the inner
+      // try/catch in [speak] without re-attempting init.
     }
   }
 
