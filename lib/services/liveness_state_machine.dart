@@ -6,6 +6,15 @@ import '../core/constants/thresholds.dart';
 import '../features/face_verification/domain/entities/face_data.dart';
 import '../features/face_verification/domain/entities/liveness_step.dart';
 
+/// F-2: gate per-frame `print` calls behind a build-time flag. Same
+/// reasoning as in `camera_preview_widget.dart` — `flutter`-tag logcat
+/// is throttled and a verbose per-frame trace silently drops other
+/// useful log lines. Re-enable with `--dart-define=PER_FRAME_LOG=true`.
+const bool _kPerFrameLog = bool.fromEnvironment(
+  'PER_FRAME_LOG',
+  defaultValue: false,
+);
+
 /// Pure Dart port of LivenessDetector.kt. Sequence is fixed:
 /// BLINK → MOUTH_OPEN → TURN_LEFT → TURN_RIGHT → STILL.
 ///
@@ -80,17 +89,21 @@ class LivenessStateMachine {
     final l = lRaw ?? (_hasSeenOpen ? 0.0 : 1.0);
     final r = rRaw ?? (_hasSeenOpen ? 0.0 : 1.0);
 
-    // ignore: avoid_print
-    print('[BLINK] l=${lRaw?.toStringAsFixed(3) ?? 'NULL'} '
-        'r=${rRaw?.toStringAsFixed(3) ?? 'NULL'} '
-        'effective(l=${l.toStringAsFixed(1)}, r=${r.toStringAsFixed(1)}) '
-        'hasSeenOpen=$_hasSeenOpen isBlinking=$_isBlinking');
+    if (_kPerFrameLog) {
+      // ignore: avoid_print
+      print('[BLINK] l=${lRaw?.toStringAsFixed(3) ?? 'NULL'} '
+          'r=${rRaw?.toStringAsFixed(3) ?? 'NULL'} '
+          'effective(l=${l.toStringAsFixed(1)}, r=${r.toStringAsFixed(1)}) '
+          'hasSeenOpen=$_hasSeenOpen isBlinking=$_isBlinking');
+    }
 
     if (l > FaceThresholds.eyeOpen && r > FaceThresholds.eyeOpen) {
       _hasSeenOpen = true;
       if (_isBlinking) {
-        // ignore: avoid_print
-        print('[BLINK] -> OPEN after close, ADVANCING');
+        if (_kPerFrameLog) {
+          // ignore: avoid_print
+          print('[BLINK] -> OPEN after close, ADVANCING');
+        }
         _isBlinking = false;
         _hasSeenOpen = false; // Reset for potential future re-enroll
         return true;
@@ -99,8 +112,10 @@ class LivenessStateMachine {
         l < FaceThresholds.eyeClosed &&
         r < FaceThresholds.eyeClosed) {
       if (!_isBlinking) {
-        // ignore: avoid_print
-        print('[BLINK] -> CLOSED detected');
+        if (_kPerFrameLog) {
+          // ignore: avoid_print
+          print('[BLINK] -> CLOSED detected');
+        }
       }
       _isBlinking = true;
     }

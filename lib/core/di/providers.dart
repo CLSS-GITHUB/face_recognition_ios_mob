@@ -1,3 +1,5 @@
+import 'dart:io';
+
 import 'package:camera/camera.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:logging/logging.dart';
@@ -103,6 +105,20 @@ final enrollUserUseCaseProvider = Provider<EnrollUser>((ref) {
   return EnrollUser(repo, matcher);
 });
 
+/// F-4: monotonic revision of the active user bank. Bumped by every
+/// mutation path (enrol, delete, toggleActive, rename) and read by the
+/// verify controller to decide whether `_warmTemplates` needs to re-run
+/// after a result dialog dismissal.
+///
+/// Why we care: `_warmTemplates` AES-GCM-decrypts every active user's
+/// template blob. For a bank of 50 users that's ~30-120 ms. The verify
+/// screen used to re-decrypt on every `dismissResult` even though the
+/// bank cannot mutate while the result dialog is up (the dialog is
+/// modal and the user cannot navigate to Manage Users / Enrol from
+/// inside it). This revision counter lets us skip the redundant work
+/// while still picking up legitimate changes the moment they happen.
+final userBankRevisionProvider = StateProvider<int>((_) => 0);
+
 // ----------------------- Verify Identity wiring -----------------------------
 //
 // See docs/verification/architecture_recommendations.md §2.3.
@@ -186,18 +202,70 @@ final verifyUserUseCaseProvider = Provider<VerifyUser>((ref) {
   );
 });
 
+/// F-1: long-lived front-facing `CameraController`. The actual
+/// `CameraController.initialize()` call dominates the cold tap → first
+/// frame latency at ~250-500 ms on Android (camera2 driver open). Moving
+/// the controller out of `CameraPreviewWidget` into a `keepAlive`
+/// provider lets the verify-side prewarm pay that cost during the
+/// home → /verify route transition (~250-300 ms) so the widget binds to
+/// an already-initialised stream when it mounts.
+///
+/// Lifetime: the provider stays alive for the app session — the
+/// `CameraPreviewWidget` only owns the image-stream subscription, not
+/// the controller itself. The user explicitly accepted the ~3-5%
+/// long-running battery cost in exchange for the latency win.
+///
+/// Failures during init surface as the FutureProvider's `error` state;
+/// the widget falls back to its existing error-banner path.
+final cameraControllerProvider =
+    FutureProvider<CameraController>((ref) async {
+  ref.keepAlive();
+  final log = Logger('CameraControllerProvider');
+  final cameras = await availableCameras();
+  final camera = cameras.firstWhere(
+    (c) => c.lensDirection == CameraLensDirection.front,
+    orElse: () => cameras.first,
+  );
+  final controller = CameraController(
+    camera,
+    ResolutionPreset.medium,
+    enableAudio: false,
+    imageFormatGroup: Platform.isAndroid
+        ? ImageFormatGroup.nv21
+        : ImageFormatGroup.bgra8888,
+  );
+  await controller.initialize();
+  ref.onDispose(() async {
+    try {
+      if (controller.value.isStreamingImages) {
+        await controller.stopImageStream();
+      }
+    } catch (e, st) {
+      log.warning('stopImageStream during provider dispose failed', e, st);
+    }
+    try {
+      await controller.dispose();
+    } catch (e, st) {
+      log.warning('CameraController.dispose failed', e, st);
+    }
+  });
+  return controller;
+});
+
 /// Pre-warms everything the Verify Identity screen needs so the first
 /// camera frame is visible quickly after the user taps "Verify Identity"
 /// (architecture §6.1: target ≤ 700 ms on Pixel 6).
 ///
-/// Three tasks run in parallel:
+/// Four tasks run in parallel:
 ///   1. `availableCameras()` — caches the camera list inside the camera
-///      plugin so `CameraPreviewWidget._bootstrap` doesn't need to query
-///      the OS again.
-///   2. `userRepository.activeFlatTemplates()` — performs the per-row
+///      plugin so `cameraControllerProvider` doesn't re-query the OS.
+///   2. **F-1: `cameraControllerProvider`** — pays the ~250-500 ms
+///      `CameraController.initialize()` cost up-front, so the widget
+///      mounts onto a hot controller.
+///   3. `userRepository.activeFlatTemplates()` — performs the per-row
 ///      AES-GCM decrypt once; the controller's `_warmTemplates` will
 ///      hit the now-warm in-memory bank cheaply.
-///   3. `embeddingIsolateProvider.future` — pays the ~80 ms isolate spawn
+///   4. `embeddingIsolateProvider.future` — pays the ~80 ms isolate spawn
 ///      cost (model load + Interpreter.fromBuffer) up-front.
 ///
 /// `keepAlive` so calling it twice is idempotent: the home-screen tap
@@ -216,6 +284,13 @@ final verifyPrewarmProvider = FutureProvider<void>((ref) async {
         await availableCameras();
       } catch (e, st) {
         log.warning('availableCameras prewarm failed', e, st);
+      }
+    }(),
+    () async {
+      try {
+        await ref.read(cameraControllerProvider.future);
+      } catch (e, st) {
+        log.warning('cameraController prewarm failed', e, st);
       }
     }(),
     () async {

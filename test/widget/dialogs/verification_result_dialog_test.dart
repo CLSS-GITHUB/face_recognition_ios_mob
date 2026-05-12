@@ -21,7 +21,7 @@ void main() {
       (tester) async {
     await _pump(
       tester,
-      VerificationResultDialog(
+      VerificationResultPanel(
         matched: _user('John Doe'),
         onDismiss: () {},
       ),
@@ -35,7 +35,7 @@ void main() {
       (tester) async {
     await _pump(
       tester,
-      VerificationResultDialog(
+      VerificationResultPanel(
         matched: null,
         onDismiss: () {},
       ),
@@ -52,7 +52,7 @@ void main() {
     var calls = 0;
     await _pump(
       tester,
-      VerificationResultDialog(
+      VerificationResultPanel(
         matched: _user('Alice'),
         onDismiss: () => calls++,
       ),

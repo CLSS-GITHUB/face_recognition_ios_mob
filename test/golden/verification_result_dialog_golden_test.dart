@@ -26,7 +26,7 @@ Widget _harness(Widget child) {
 void main() {
   testWidgets('granted dialog matches golden', (tester) async {
     await tester.pumpWidget(_harness(
-      VerificationResultDialog(
+      VerificationResultPanel(
         matched: _user('John Doe'),
         onDismiss: () {},
       ),
@@ -40,7 +40,7 @@ void main() {
 
   testWidgets('denied dialog matches golden', (tester) async {
     await tester.pumpWidget(_harness(
-      VerificationResultDialog(
+      VerificationResultPanel(
         matched: null,
         onDismiss: () {},
       ),

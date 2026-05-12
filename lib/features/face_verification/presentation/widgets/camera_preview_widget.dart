@@ -1,11 +1,23 @@
-import 'dart:io';
-
 import 'package:camera/camera.dart';
 import 'package:flutter/material.dart';
+import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:google_mlkit_commons/google_mlkit_commons.dart';
 import 'package:logging/logging.dart';
 
+import '../../../../core/di/providers.dart';
 import '../../../../core/utils/camera_image_converter.dart';
+
+/// F-2: gate per-frame `print` calls behind a build-time flag. Flutter's
+/// `print` lands in logcat under the `flutter` tag which is throttled to
+/// 12 KB/s; at 30 fps a small log on every frame would saturate that
+/// budget and stall a frame. The const value lets the compiler elide the
+/// log calls entirely when the flag is unset (the default in normal
+/// builds). Re-enable with `--dart-define=PER_FRAME_LOG=true` when
+/// debugging the camera pipeline.
+const bool _kPerFrameLog = bool.fromEnvironment(
+  'PER_FRAME_LOG',
+  defaultValue: false,
+);
 
 typedef OnFrame = Future<void> Function(
   CameraImage raw,
@@ -16,29 +28,41 @@ typedef OnFrame = Future<void> Function(
 ///
 /// Reproduces CameraX's STRATEGY_KEEP_ONLY_LATEST: while [onFrame] is busy,
 /// new frames are dropped — never queued.
-class CameraPreviewWidget extends StatefulWidget {
+///
+/// F-1: the underlying `CameraController` is owned by
+/// `cameraControllerProvider` (a `keepAlive` Riverpod provider) so the
+/// ~250-500 ms initialise cost is paid once during verify-prewarm rather
+/// than on every screen mount. This widget only manages the image-stream
+/// subscription against that shared controller — it does NOT dispose the
+/// controller on widget teardown.
+class CameraPreviewWidget extends ConsumerStatefulWidget {
   const CameraPreviewWidget({
     super.key,
     required this.onFrame,
-    this.lensDirection = CameraLensDirection.front,
-    this.resolution = ResolutionPreset.medium,
   });
 
   final OnFrame onFrame;
-  final CameraLensDirection lensDirection;
-  final ResolutionPreset resolution;
 
   @override
-  State<CameraPreviewWidget> createState() => _CameraPreviewWidgetState();
+  ConsumerState<CameraPreviewWidget> createState() =>
+      _CameraPreviewWidgetState();
 }
 
-class _CameraPreviewWidgetState extends State<CameraPreviewWidget> {
+class _CameraPreviewWidgetState extends ConsumerState<CameraPreviewWidget> {
   static final Logger _log = Logger('CameraPreviewWidget');
 
   CameraController? _controller;
   bool _busy = false;
   String? _error;
   int _diagFrames = 0;
+
+  /// Tracks whether THIS widget instance has started a stream on the
+  /// shared controller. Two safety properties depend on this:
+  /// 1. `dispose` only calls `stopImageStream` if WE started it (a
+  ///    previous widget instance might own the stream; we should not
+  ///    yank it).
+  /// 2. `_bootstrap` re-entry (e.g. hot reload) is idempotent.
+  bool _streamStarted = false;
 
   @override
   void initState() {
@@ -48,23 +72,27 @@ class _CameraPreviewWidgetState extends State<CameraPreviewWidget> {
 
   Future<void> _bootstrap() async {
     try {
-      final cameras = await availableCameras();
-      final camera = cameras.firstWhere(
-        (c) => c.lensDirection == widget.lensDirection,
-        orElse: () => cameras.first,
-      );
-      final controller = CameraController(
-        camera,
-        widget.resolution,
-        enableAudio: false,
-        imageFormatGroup: Platform.isAndroid
-            ? ImageFormatGroup.nv21
-            : ImageFormatGroup.bgra8888,
-      );
-      await controller.initialize();
+      final controller = await ref.read(cameraControllerProvider.future);
+      if (!mounted) return;
+      // Defensive: if a previous widget left the stream running and
+      // didn't get a chance to stop it (hot restart, exception path),
+      // tear it down so our `startImageStream` doesn't double-fire.
+      if (controller.value.isStreamingImages) {
+        try {
+          await controller.stopImageStream();
+        } catch (e, st) {
+          _log.warning('Defensive stopImageStream failed', e, st);
+        }
+      }
       await controller.startImageStream(_onCameraImage);
+      _streamStarted = true;
       if (!mounted) {
-        await controller.dispose();
+        // The widget was disposed while we awaited startImageStream.
+        // Tear down what we just started — the provider keeps the
+        // controller alive for the next widget instance.
+        try {
+          await controller.stopImageStream();
+        } catch (_) {}
         return;
       }
       setState(() => _controller = controller);
@@ -76,7 +104,7 @@ class _CameraPreviewWidgetState extends State<CameraPreviewWidget> {
 
   void _onCameraImage(CameraImage image) {
     _diagFrames++;
-    if (_diagFrames <= 10 || _diagFrames % 30 == 0) {
+    if (_kPerFrameLog && (_diagFrames <= 10 || _diagFrames % 30 == 0)) {
       // ignore: avoid_print
       print('[FRAME $_diagFrames] busy=$_busy '
           'formatRaw=${image.format.raw} group=${image.format.group}');
@@ -88,7 +116,7 @@ class _CameraPreviewWidgetState extends State<CameraPreviewWidget> {
       controller.description,
       controller.value.deviceOrientation,
     );
-    if (_diagFrames <= 10) {
+    if (_kPerFrameLog && _diagFrames <= 10) {
       // ignore: avoid_print
       print('[FRAME $_diagFrames] devOrient=${controller.value.deviceOrientation} '
           'sensor=${controller.description.sensorOrientation} '
@@ -107,10 +135,15 @@ class _CameraPreviewWidgetState extends State<CameraPreviewWidget> {
 
   @override
   void dispose() {
+    // F-1: we own only the image-stream subscription, not the controller
+    // itself. Stop the stream so the next widget instance (verify ↔
+    // enroll navigation) can start a fresh one bound to its own
+    // callbacks. The controller stays initialised in the provider.
     final c = _controller;
-    if (c != null) {
-      c.stopImageStream().catchError((_) {});
-      c.dispose();
+    if (c != null && _streamStarted) {
+      c.stopImageStream().catchError((e, st) {
+        _log.warning('stopImageStream on widget dispose failed', e, st);
+      });
     }
     super.dispose();
   }

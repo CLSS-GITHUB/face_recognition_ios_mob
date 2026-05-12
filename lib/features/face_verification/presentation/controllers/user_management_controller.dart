@@ -64,6 +64,10 @@ class UserManagementController extends AutoDisposeNotifier<void> {
     await ref
         .read(userRepositoryProvider)
         .upsert(user.copyWith(isActive: !user.isActive));
+    // F-4: bump the bank revision so the verify screen picks up the
+    // active/inactive change on its next entry (or its next
+    // dismissResult, if it's already open).
+    ref.read(userBankRevisionProvider.notifier).update((v) => v + 1);
   }
 
   Future<void> deleteUser(User user) async {
@@ -77,6 +81,7 @@ class UserManagementController extends AutoDisposeNotifier<void> {
       }
     }
     await ref.read(userRepositoryProvider).delete(user);
+    ref.read(userBankRevisionProvider.notifier).update((v) => v + 1);
   }
 
   /// Renames a user. Validates the new name (1–80 chars, trimmed). The
@@ -97,6 +102,10 @@ class UserManagementController extends AutoDisposeNotifier<void> {
     if (trimmed == user.name) return; // no-op
     final db = ref.read(dbProvider);
     await db.userDao.updateName(user.userId, trimmed);
+    // F-4: rename doesn't affect match (templates unchanged) but the
+    // verify-success dialog shows the user's name. Bumping the revision
+    // keeps the displayed name fresh after a rename + re-verify.
+    ref.read(userBankRevisionProvider.notifier).update((v) => v + 1);
   }
 }
 

@@ -23,6 +23,15 @@ import '../../domain/entities/face_data.dart';
 import '../../domain/entities/liveness_step.dart';
 import '../../domain/entities/quality_result.dart';
 
+/// F-2: gate per-frame `print` calls behind a build-time flag. Same
+/// reasoning as the verify-side widget — flutter-tag logcat is
+/// throttled and a verbose per-frame trace silently drops other useful
+/// log lines. Re-enable with `--dart-define=PER_FRAME_LOG=true`.
+const bool _kPerFrameLog = bool.fromEnvironment(
+  'PER_FRAME_LOG',
+  defaultValue: false,
+);
+
 class EnrollmentState {
   const EnrollmentState({
     required this.stage,
@@ -158,7 +167,7 @@ class EnrollmentController extends AutoDisposeNotifier<EnrollmentState> {
     final rotation = forMlKit.metadata?.rotation;
     final frameSize = forMlKit.metadata?.size ?? Size.zero;
 
-    if (n <= 5 || n % 30 == 0) {
+    if (_kPerFrameLog && (n <= 5 || n % 30 == 0)) {
       // ignore: avoid_print
       print('[PROC $n] enter stage=${state.stage} '
           'size=${frameSize.width.toInt()}x${frameSize.height.toInt()} '
@@ -175,18 +184,19 @@ class EnrollmentController extends AutoDisposeNotifier<EnrollmentState> {
       faces = await detector.detect(forMlKit).timeout(
         const Duration(seconds: 3),
         onTimeout: () {
-          // ignore: avoid_print
-          print('[PROC $n] DETECT TIMEOUT');
+          // Timeout is a real warning even in non-verbose mode — leave
+          // this through the proper logger so it always lands.
+          _log.warning('[PROC $n] DETECT TIMEOUT');
           return const <FaceData>[];
         },
       );
     } catch (e, st) {
-      // ignore: avoid_print
-      print('[PROC $n] DETECT THREW: $e\n$st');
+      _log.warning('[PROC $n] DETECT THREW', e, st);
       return;
     }
 
-    if (n <= 5 || (faces.isEmpty && n % 30 == 0) || (faces.isNotEmpty && n % 10 == 0)) {
+    if (_kPerFrameLog &&
+        (n <= 5 || (faces.isEmpty && n % 30 == 0) || (faces.isNotEmpty && n % 10 == 0))) {
       // ignore: avoid_print
       print('[PROC $n] after detect faces=${faces.length}');
     }
@@ -206,7 +216,7 @@ class EnrollmentController extends AutoDisposeNotifier<EnrollmentState> {
         ? Size(frameSize.height, frameSize.width)
         : frameSize;
 
-    if (faces.isNotEmpty) {
+    if (_kPerFrameLog && faces.isNotEmpty) {
       final face = faces.first;
       if (n % 10 == 0) {
         // ignore: avoid_print
@@ -259,11 +269,13 @@ class EnrollmentController extends AutoDisposeNotifier<EnrollmentState> {
 
     final quality = assessor.assess(face, frameSize,
         currentStep: liveness.currentStep, brightness: brightness);
-    // ignore: avoid_print
-    print('[STAGE] step=${liveness.currentStep} qualityOk=${quality.isGood} '
-        'issues=${quality.issues} brightness=${brightness.toStringAsFixed(0)} '
-        'yaw=${face.headEulerY.toStringAsFixed(1)} '
-        'pitch=${face.headEulerX.toStringAsFixed(1)}');
+    if (_kPerFrameLog) {
+      // ignore: avoid_print
+      print('[STAGE] step=${liveness.currentStep} qualityOk=${quality.isGood} '
+          'issues=${quality.issues} brightness=${brightness.toStringAsFixed(0)} '
+          'yaw=${face.headEulerY.toStringAsFixed(1)} '
+          'pitch=${face.headEulerX.toStringAsFixed(1)}');
+    }
     state = state.copyWith(quality: quality, currentStep: liveness.currentStep);
     if (!quality.isGood) return;
 
@@ -491,7 +503,7 @@ class EnrollmentController extends AutoDisposeNotifier<EnrollmentState> {
       throw StateError('register() called before embedding captured');
     }
     final useCase = ref.read(enrollUserUseCaseProvider);
-    return useCase.call(
+    final result = await useCase.call(
       userCode: userCode,
       userName: userName,
       embedding: embedding,
@@ -502,6 +514,11 @@ class EnrollmentController extends AutoDisposeNotifier<EnrollmentState> {
       // an opposite-state template alongside the original.
       wearsGlasses: wearsGlasses,
     );
+    // F-4: enrol mutated the active bank. Bump the revision so the
+    // verify screen re-decrypts on its next entry instead of running
+    // against a stale flat-templates view.
+    ref.read(userBankRevisionProvider.notifier).update((v) => v + 1);
+    return result;
   }
 
   void retryAll() {

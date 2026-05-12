@@ -33,8 +33,6 @@ class VerificationScreen extends ConsumerStatefulWidget {
 }
 
 class _VerificationScreenState extends ConsumerState<VerificationScreen> {
-  bool _resultDialogOpen = false;
-
   @override
   void initState() {
     super.initState();
@@ -47,20 +45,48 @@ class _VerificationScreenState extends ConsumerState<VerificationScreen> {
 
   @override
   Widget build(BuildContext context) {
-    ref.listen(verificationControllerProvider, _reactToState);
-
     final state = ref.watch(verificationControllerProvider);
     final scheme = Theme.of(context).colorScheme;
 
     return Scaffold(
       backgroundColor: scheme.surface,
-      // LayoutBuilder + SingleChildScrollView + IntrinsicHeight: column fills
-      // the viewport when there's room (Spacer keeps Cancel pinned to bottom),
-      // and scrolls cleanly on small or landscape screens. Mirrors the same
-      // fix on live_enrollment_screen.dart — both screens share the
-      // 300×300 camera oval that overflows on heights ≲ 640 px.
-      body: SafeArea(
-        child: LayoutBuilder(
+      // F-3: inline-overlay result panel replaces the old `showDialog`
+      // route. The body is wrapped in a Stack so the panel renders on
+      // top without a Material modal transition — verdict is visible
+      // ~200 ms sooner on every granted match. Panel itself opacity-
+      // animates in over ~80 ms so the swap isn't jarring.
+      body: Stack(
+        children: [
+          SafeArea(
+            child: _buildBody(context, state, scheme),
+          ),
+          AnimatedSwitcher(
+            duration: const Duration(milliseconds: 80),
+            transitionBuilder: (child, anim) =>
+                FadeTransition(opacity: anim, child: child),
+            child: state.showResult
+                ? VerificationResultPanel(
+                    key: const ValueKey<String>('result-panel'),
+                    matched: state.matchedUser,
+                    onDismiss: () => ref
+                        .read(verificationControllerProvider.notifier)
+                        .dismissResult(),
+                  )
+                : const SizedBox.shrink(
+                    key: ValueKey<String>('result-panel-hidden'),
+                  ),
+          ),
+        ],
+      ),
+    );
+  }
+
+  Widget _buildBody(
+    BuildContext context,
+    VerificationState state,
+    ColorScheme scheme,
+  ) {
+    return LayoutBuilder(
           builder: (context, constraints) => SingleChildScrollView(
             child: ConstrainedBox(
               constraints: BoxConstraints(minHeight: constraints.maxHeight),
@@ -204,9 +230,7 @@ class _VerificationScreenState extends ConsumerState<VerificationScreen> {
               ),
             ),
           ),
-        ),
-      ),
-    );
+        );
   }
 
   /// Ring colour mirrors architecture_recommendations.md §6.2:
@@ -249,28 +273,6 @@ class _VerificationScreenState extends ConsumerState<VerificationScreen> {
     };
   }
 
-  void _reactToState(VerificationState? prev, VerificationState next) {
-    final justShownResult =
-        (prev?.showResult ?? false) == false && next.showResult;
-    if (!justShownResult || _resultDialogOpen) return;
-
-    _resultDialogOpen = true;
-    WidgetsBinding.instance.addPostFrameCallback((_) {
-      if (!mounted) return;
-      showDialog<void>(
-        context: context,
-        barrierDismissible: false,
-        builder: (_) => VerificationResultDialog(
-          matched: next.matchedUser,
-          onDismiss: () {
-            Navigator.of(context).pop();
-            _resultDialogOpen = false;
-            ref.read(verificationControllerProvider.notifier).dismissResult();
-          },
-        ),
-      );
-    });
-  }
 }
 
 /// Plain coloured oval ring drawn behind the camera preview. Replaces the

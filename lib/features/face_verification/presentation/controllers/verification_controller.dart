@@ -203,6 +203,15 @@ class VerificationController extends AutoDisposeNotifier<VerificationState> {
   /// throw `EmbeddingBusyError`. Either way: skip.
   bool _inSpeculation = false;
 
+  /// F-4: revision of the active user bank at the moment of the most
+  /// recent successful `_warmTemplates`. `dismissResult` compares this
+  /// against the current `userBankRevisionProvider` value and skips the
+  /// re-warm when they match — the bank cannot mutate while the result
+  /// dialog is up (the dialog is modal), so the common case is "no
+  /// mutation, no re-decrypt needed". Starts at -1 so the very first
+  /// warm always runs.
+  int _lastWarmedRevision = -1;
+
   @override
   VerificationState build() {
     ref.onDispose(() {
@@ -290,12 +299,18 @@ class VerificationController extends AutoDisposeNotifier<VerificationState> {
 
   Future<void> _warmTemplates() async {
     try {
+      // F-4: snapshot the revision BEFORE the decrypt so an
+      // interleaved mutation that lands during decrypt still triggers a
+      // future re-warm (we'd see `current > _lastWarmedRevision` on the
+      // next dismissResult check).
+      final revision = ref.read(userBankRevisionProvider);
       final flat =
           await ref.read(userRepositoryProvider).activeFlatTemplates();
       if (_disposed) return;
+      _lastWarmedRevision = revision;
       state = state.copyWith(flat: flat, isReady: true);
       _log.fine('Pre-warmed ${flat.count} templates from '
-          '${flat.uniqueUserCount} unique users');
+          '${flat.uniqueUserCount} unique users (rev=$revision)');
     } catch (e, st) {
       _log.severe('Failed to pre-warm templates', e, st);
       state = state.copyWith(
@@ -848,10 +863,16 @@ class VerificationController extends AutoDisposeNotifier<VerificationState> {
       clearMatchedUser: true,
       status: 'Scanning face...',
     );
-    // Pick up any enroll / delete that happened while the result dialog
-    // was up. `_warmTemplates` is a single encrypted-row scan; cheap
-    // enough to run on every dismissal even when nothing changed.
-    unawaited(_warmTemplates());
+    // F-4: only re-warm when the bank has actually mutated since the
+    // last warm. The verify result dialog is modal — the user cannot
+    // enrol or delete from inside it — so the common path is
+    // revision-unchanged and the AES-GCM decrypt is skipped entirely.
+    // The revision counter still picks up legitimate mutations from a
+    // sibling tab / future code path that bumps it during the dialog.
+    final currentRevision = ref.read(userBankRevisionProvider);
+    if (currentRevision != _lastWarmedRevision) {
+      unawaited(_warmTemplates());
+    }
   }
 
   /// Spoof short-circuit: writes a `verification_logs` row, records a
