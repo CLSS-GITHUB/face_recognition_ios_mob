@@ -13,6 +13,7 @@ import 'package:sensors_plus/sensors_plus.dart';
 
 import '../../../../core/constants/thresholds.dart';
 import '../../../../core/di/providers.dart';
+import '../../../../core/error/failures.dart';
 import '../../../../core/platform/rate_limiter.dart';
 import '../../../../core/utils/blur_metric.dart';
 import '../../../../core/utils/frame_preparation.dart';
@@ -202,6 +203,15 @@ class VerificationController extends AutoDisposeNotifier<VerificationState> {
   /// is about to use the isolate, the speculation we'd start would
   /// throw `EmbeddingBusyError`. Either way: skip.
   bool _inSpeculation = false;
+
+  /// Completer signalled when the current speculation finishes. Lets
+  /// `_runMatch` `await` the in-flight speculation instead of racing it
+  /// — without this, a "user finishes liveness just as speculation
+  /// dispatched to the isolate" sequence makes `_runMatch`'s slow-path
+  /// `prepare` throw `EmbeddingBusyError`, which used to surface as a
+  /// misleading "Frame format unsupported" status. Cleared at the end
+  /// of each speculation in `_maybeSpeculate`'s finally block.
+  Completer<void>? _speculationCompleter;
 
   /// F-4: revision of the active user bank at the moment of the most
   /// recent successful `_warmTemplates`. `dismissResult` compares this
@@ -621,6 +631,8 @@ class VerificationController extends AutoDisposeNotifier<VerificationState> {
       return;
     }
     _inSpeculation = true;
+    final completer = Completer<void>();
+    _speculationCompleter = completer;
     try {
       final format = _rawFrameFormat(raw);
       if (format == null) return;
@@ -668,6 +680,8 @@ class VerificationController extends AutoDisposeNotifier<VerificationState> {
       _speculativeProbe = (embedding: embedding, at: DateTime.now());
     } finally {
       _inSpeculation = false;
+      _speculationCompleter = null;
+      if (!completer.isCompleted) completer.complete();
     }
   }
 
@@ -686,6 +700,21 @@ class VerificationController extends AutoDisposeNotifier<VerificationState> {
       // straight to rate-limit + match. The cache TTL (500 ms) is short
       // enough that the probe still reflects the user actively in front
       // of the camera, not a stale frame from earlier in the session.
+      //
+      // First: if a speculation is *still in flight* (it dispatched to
+      // the isolate just before the user completed liveness), await it
+      // briefly so the cache has a chance to land before we read it.
+      // Without this wait, we'd race into the slow path's `prepare()`
+      // while the isolate is single-flight-busy and hit
+      // `EmbeddingBusyError`.
+      final inFlight = _speculationCompleter;
+      if (inFlight != null && !inFlight.isCompleted) {
+        await inFlight.future.timeout(
+          const Duration(milliseconds: 120),
+          onTimeout: () {},
+        );
+        if (_disposed) return;
+      }
       final cached = _speculativeProbe;
       final cacheAgeMs = cached == null
           ? -1
@@ -726,6 +755,16 @@ class VerificationController extends AutoDisposeNotifier<VerificationState> {
             rightEyeX: rightEye?.x,
             rightEyeY: rightEye?.y,
           );
+        } on EmbeddingBusyError {
+          // The isolate is still serving an in-flight speculation we
+          // raced past the await above (e.g. it landed within the 120 ms
+          // window but the cache wasn't fresh enough). Step back to idle
+          // — the next frame will either find a fresh cached probe
+          // (fast path) or the isolate will be free for a clean
+          // prepare. Don't surface "format unsupported": the frame is
+          // fine, the resource was just briefly busy.
+          state = state.copyWith(isVerifying: false);
+          return;
         } catch (e, st) {
           _log.warning('Frame preparation failed', e, st);
           state = state.copyWith(
