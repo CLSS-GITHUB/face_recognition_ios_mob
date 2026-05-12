@@ -14,6 +14,7 @@ class VerificationLog {
     required this.latencyMs,
     this.failureReason,
     this.bestSimilarity,
+    this.padScore,
   });
 
   final String? userId;
@@ -30,6 +31,16 @@ class VerificationLog {
   /// Best cosine similarity at decision time, if the pipeline got that far.
   /// Bounded `[-1, 1]`. Never the embedding.
   final double? bestSimilarity;
+
+  /// F-10 instrumentation. Spoof score in `[0, 1]` from the passive PAD
+  /// classifier — `0.0` = real / live, `1.0` = strongly spoofed. NULL
+  /// when PAD did not run on this attempt (per-frame quality / motion
+  /// gates that short-circuit before the embedding extractor, or the
+  /// classifier itself raised [PadUnavailableError]). With the default
+  /// [NoOpPadClassifier] this is `0.0` for every row that reached the
+  /// PAD step. Persisted so a future calibration study can compute
+  /// FRR/FAR on the deployment population without re-collecting data.
+  final double? padScore;
 
   final int latencyMs;
 }

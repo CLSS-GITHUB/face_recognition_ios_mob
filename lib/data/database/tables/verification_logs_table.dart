@@ -35,6 +35,17 @@ class VerificationLogs extends Table {
 
   RealColumn get bestSimilarity => real().nullable()();
 
+  /// F-10 instrumentation. Spoof score in `[0, 1]` from the passive PAD
+  /// classifier (`0.0` = real / live, `1.0` = strongly spoofed). NULL on
+  /// rows written before PAD ran (per-frame quality / liveness / motion
+  /// failures that short-circuit before the embedding extractor) and on
+  /// rows from app versions before the v5 schema bump. Recording this
+  /// per-attempt is the input data for the calibration study described
+  /// in `docs/verification/ultra_fast_verification_analysis.md` §9.4 —
+  /// without it, the threshold cannot be re-tuned away from the 0.5
+  /// placeholder safely.
+  RealColumn get padScore => real().nullable()();
+
   IntColumn get latencyMs => integer()();
 
   @override

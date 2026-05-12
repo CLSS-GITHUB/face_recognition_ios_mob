@@ -17,7 +17,7 @@ class AppDatabase extends _$AppDatabase {
       : super(executor ?? driftDatabase(name: 'face_verification_db'));
 
   @override
-  int get schemaVersion => 4;
+  int get schemaVersion => 5;
 
   @override
   MigrationStrategy get migration => MigrationStrategy(
@@ -54,6 +54,21 @@ class AppDatabase extends _$AppDatabase {
             // a user who re-enrols stays fresh even if their original
             // enrolledAt is years old.
             await m.addColumn(users, users.lastEnrolledAt);
+          }
+          if (from >= 2 && from < 5) {
+            // pad_score: nullable REAL. F-10 instrumentation column.
+            // Pre-v5 rows have NULL — they were captured before the PAD
+            // pipeline existed, so there is no spoof score to backfill.
+            // Going forward the verify use case writes one whenever PAD
+            // ran on the attempt (NoOp emits 0.0, real models emit
+            // a real spoof score; failures land as NULL).
+            //
+            // Guarded on `from >= 2`: a v1 origin reaches this point
+            // having just created `verification_logs` fresh in the
+            // block above, with `pad_score` already present in the
+            // current table schema — re-adding here would duplicate
+            // the column.
+            await m.addColumn(verificationLogs, verificationLogs.padScore);
           }
         },
         // Foreign keys are off by default in SQLite. We need them on so that

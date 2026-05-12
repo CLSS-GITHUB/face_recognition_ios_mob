@@ -724,6 +724,17 @@ class $VerificationLogsTable extends VerificationLogs
     type: DriftSqlType.double,
     requiredDuringInsert: false,
   );
+  static const VerificationMeta _padScoreMeta = const VerificationMeta(
+    'padScore',
+  );
+  @override
+  late final GeneratedColumn<double> padScore = GeneratedColumn<double>(
+    'pad_score',
+    aliasedName,
+    true,
+    type: DriftSqlType.double,
+    requiredDuringInsert: false,
+  );
   static const VerificationMeta _latencyMsMeta = const VerificationMeta(
     'latencyMs',
   );
@@ -743,6 +754,7 @@ class $VerificationLogsTable extends VerificationLogs
     outcome,
     failureReason,
     bestSimilarity,
+    padScore,
     latencyMs,
   ];
   @override
@@ -797,6 +809,12 @@ class $VerificationLogsTable extends VerificationLogs
         ),
       );
     }
+    if (data.containsKey('pad_score')) {
+      context.handle(
+        _padScoreMeta,
+        padScore.isAcceptableOrUnknown(data['pad_score']!, _padScoreMeta),
+      );
+    }
     if (data.containsKey('latency_ms')) {
       context.handle(
         _latencyMsMeta,
@@ -838,6 +856,10 @@ class $VerificationLogsTable extends VerificationLogs
         DriftSqlType.double,
         data['${effectivePrefix}best_similarity'],
       ),
+      padScore: attachedDatabase.typeMapping.read(
+        DriftSqlType.double,
+        data['${effectivePrefix}pad_score'],
+      ),
       latencyMs: attachedDatabase.typeMapping.read(
         DriftSqlType.int,
         data['${effectivePrefix}latency_ms'],
@@ -866,6 +888,17 @@ class VerificationLogRow extends DataClass
   final String outcome;
   final String? failureReason;
   final double? bestSimilarity;
+
+  /// F-10 instrumentation. Spoof score in `[0, 1]` from the passive PAD
+  /// classifier (`0.0` = real / live, `1.0` = strongly spoofed). NULL on
+  /// rows written before PAD ran (per-frame quality / liveness / motion
+  /// failures that short-circuit before the embedding extractor) and on
+  /// rows from app versions before the v5 schema bump. Recording this
+  /// per-attempt is the input data for the calibration study described
+  /// in `docs/verification/ultra_fast_verification_analysis.md` §9.4 —
+  /// without it, the threshold cannot be re-tuned away from the 0.5
+  /// placeholder safely.
+  final double? padScore;
   final int latencyMs;
   const VerificationLogRow({
     required this.id,
@@ -874,6 +907,7 @@ class VerificationLogRow extends DataClass
     required this.outcome,
     this.failureReason,
     this.bestSimilarity,
+    this.padScore,
     required this.latencyMs,
   });
   @override
@@ -890,6 +924,9 @@ class VerificationLogRow extends DataClass
     }
     if (!nullToAbsent || bestSimilarity != null) {
       map['best_similarity'] = Variable<double>(bestSimilarity);
+    }
+    if (!nullToAbsent || padScore != null) {
+      map['pad_score'] = Variable<double>(padScore);
     }
     map['latency_ms'] = Variable<int>(latencyMs);
     return map;
@@ -909,6 +946,9 @@ class VerificationLogRow extends DataClass
       bestSimilarity: bestSimilarity == null && nullToAbsent
           ? const Value.absent()
           : Value(bestSimilarity),
+      padScore: padScore == null && nullToAbsent
+          ? const Value.absent()
+          : Value(padScore),
       latencyMs: Value(latencyMs),
     );
   }
@@ -925,6 +965,7 @@ class VerificationLogRow extends DataClass
       outcome: serializer.fromJson<String>(json['outcome']),
       failureReason: serializer.fromJson<String?>(json['failureReason']),
       bestSimilarity: serializer.fromJson<double?>(json['bestSimilarity']),
+      padScore: serializer.fromJson<double?>(json['padScore']),
       latencyMs: serializer.fromJson<int>(json['latencyMs']),
     );
   }
@@ -938,6 +979,7 @@ class VerificationLogRow extends DataClass
       'outcome': serializer.toJson<String>(outcome),
       'failureReason': serializer.toJson<String?>(failureReason),
       'bestSimilarity': serializer.toJson<double?>(bestSimilarity),
+      'padScore': serializer.toJson<double?>(padScore),
       'latencyMs': serializer.toJson<int>(latencyMs),
     };
   }
@@ -949,6 +991,7 @@ class VerificationLogRow extends DataClass
     String? outcome,
     Value<String?> failureReason = const Value.absent(),
     Value<double?> bestSimilarity = const Value.absent(),
+    Value<double?> padScore = const Value.absent(),
     int? latencyMs,
   }) => VerificationLogRow(
     id: id ?? this.id,
@@ -961,6 +1004,7 @@ class VerificationLogRow extends DataClass
     bestSimilarity: bestSimilarity.present
         ? bestSimilarity.value
         : this.bestSimilarity,
+    padScore: padScore.present ? padScore.value : this.padScore,
     latencyMs: latencyMs ?? this.latencyMs,
   );
   VerificationLogRow copyWithCompanion(VerificationLogsCompanion data) {
@@ -975,6 +1019,7 @@ class VerificationLogRow extends DataClass
       bestSimilarity: data.bestSimilarity.present
           ? data.bestSimilarity.value
           : this.bestSimilarity,
+      padScore: data.padScore.present ? data.padScore.value : this.padScore,
       latencyMs: data.latencyMs.present ? data.latencyMs.value : this.latencyMs,
     );
   }
@@ -988,6 +1033,7 @@ class VerificationLogRow extends DataClass
           ..write('outcome: $outcome, ')
           ..write('failureReason: $failureReason, ')
           ..write('bestSimilarity: $bestSimilarity, ')
+          ..write('padScore: $padScore, ')
           ..write('latencyMs: $latencyMs')
           ..write(')'))
         .toString();
@@ -1001,6 +1047,7 @@ class VerificationLogRow extends DataClass
     outcome,
     failureReason,
     bestSimilarity,
+    padScore,
     latencyMs,
   );
   @override
@@ -1013,6 +1060,7 @@ class VerificationLogRow extends DataClass
           other.outcome == this.outcome &&
           other.failureReason == this.failureReason &&
           other.bestSimilarity == this.bestSimilarity &&
+          other.padScore == this.padScore &&
           other.latencyMs == this.latencyMs);
 }
 
@@ -1023,6 +1071,7 @@ class VerificationLogsCompanion extends UpdateCompanion<VerificationLogRow> {
   final Value<String> outcome;
   final Value<String?> failureReason;
   final Value<double?> bestSimilarity;
+  final Value<double?> padScore;
   final Value<int> latencyMs;
   const VerificationLogsCompanion({
     this.id = const Value.absent(),
@@ -1031,6 +1080,7 @@ class VerificationLogsCompanion extends UpdateCompanion<VerificationLogRow> {
     this.outcome = const Value.absent(),
     this.failureReason = const Value.absent(),
     this.bestSimilarity = const Value.absent(),
+    this.padScore = const Value.absent(),
     this.latencyMs = const Value.absent(),
   });
   VerificationLogsCompanion.insert({
@@ -1040,6 +1090,7 @@ class VerificationLogsCompanion extends UpdateCompanion<VerificationLogRow> {
     required String outcome,
     this.failureReason = const Value.absent(),
     this.bestSimilarity = const Value.absent(),
+    this.padScore = const Value.absent(),
     required int latencyMs,
   }) : at = Value(at),
        outcome = Value(outcome),
@@ -1051,6 +1102,7 @@ class VerificationLogsCompanion extends UpdateCompanion<VerificationLogRow> {
     Expression<String>? outcome,
     Expression<String>? failureReason,
     Expression<double>? bestSimilarity,
+    Expression<double>? padScore,
     Expression<int>? latencyMs,
   }) {
     return RawValuesInsertable({
@@ -1060,6 +1112,7 @@ class VerificationLogsCompanion extends UpdateCompanion<VerificationLogRow> {
       if (outcome != null) 'outcome': outcome,
       if (failureReason != null) 'failure_reason': failureReason,
       if (bestSimilarity != null) 'best_similarity': bestSimilarity,
+      if (padScore != null) 'pad_score': padScore,
       if (latencyMs != null) 'latency_ms': latencyMs,
     });
   }
@@ -1071,6 +1124,7 @@ class VerificationLogsCompanion extends UpdateCompanion<VerificationLogRow> {
     Value<String>? outcome,
     Value<String?>? failureReason,
     Value<double?>? bestSimilarity,
+    Value<double?>? padScore,
     Value<int>? latencyMs,
   }) {
     return VerificationLogsCompanion(
@@ -1080,6 +1134,7 @@ class VerificationLogsCompanion extends UpdateCompanion<VerificationLogRow> {
       outcome: outcome ?? this.outcome,
       failureReason: failureReason ?? this.failureReason,
       bestSimilarity: bestSimilarity ?? this.bestSimilarity,
+      padScore: padScore ?? this.padScore,
       latencyMs: latencyMs ?? this.latencyMs,
     );
   }
@@ -1105,6 +1160,9 @@ class VerificationLogsCompanion extends UpdateCompanion<VerificationLogRow> {
     if (bestSimilarity.present) {
       map['best_similarity'] = Variable<double>(bestSimilarity.value);
     }
+    if (padScore.present) {
+      map['pad_score'] = Variable<double>(padScore.value);
+    }
     if (latencyMs.present) {
       map['latency_ms'] = Variable<int>(latencyMs.value);
     }
@@ -1120,6 +1178,7 @@ class VerificationLogsCompanion extends UpdateCompanion<VerificationLogRow> {
           ..write('outcome: $outcome, ')
           ..write('failureReason: $failureReason, ')
           ..write('bestSimilarity: $bestSimilarity, ')
+          ..write('padScore: $padScore, ')
           ..write('latencyMs: $latencyMs')
           ..write(')'))
         .toString();
@@ -1573,6 +1632,7 @@ typedef $$VerificationLogsTableCreateCompanionBuilder =
       required String outcome,
       Value<String?> failureReason,
       Value<double?> bestSimilarity,
+      Value<double?> padScore,
       required int latencyMs,
     });
 typedef $$VerificationLogsTableUpdateCompanionBuilder =
@@ -1583,6 +1643,7 @@ typedef $$VerificationLogsTableUpdateCompanionBuilder =
       Value<String> outcome,
       Value<String?> failureReason,
       Value<double?> bestSimilarity,
+      Value<double?> padScore,
       Value<int> latencyMs,
     });
 
@@ -1652,6 +1713,11 @@ class $$VerificationLogsTableFilterComposer
     builder: (column) => ColumnFilters(column),
   );
 
+  ColumnFilters<double> get padScore => $composableBuilder(
+    column: $table.padScore,
+    builder: (column) => ColumnFilters(column),
+  );
+
   ColumnFilters<int> get latencyMs => $composableBuilder(
     column: $table.latencyMs,
     builder: (column) => ColumnFilters(column),
@@ -1715,6 +1781,11 @@ class $$VerificationLogsTableOrderingComposer
     builder: (column) => ColumnOrderings(column),
   );
 
+  ColumnOrderings<double> get padScore => $composableBuilder(
+    column: $table.padScore,
+    builder: (column) => ColumnOrderings(column),
+  );
+
   ColumnOrderings<int> get latencyMs => $composableBuilder(
     column: $table.latencyMs,
     builder: (column) => ColumnOrderings(column),
@@ -1771,6 +1842,9 @@ class $$VerificationLogsTableAnnotationComposer
     column: $table.bestSimilarity,
     builder: (column) => column,
   );
+
+  GeneratedColumn<double> get padScore =>
+      $composableBuilder(column: $table.padScore, builder: (column) => column);
 
   GeneratedColumn<int> get latencyMs =>
       $composableBuilder(column: $table.latencyMs, builder: (column) => column);
@@ -1835,6 +1909,7 @@ class $$VerificationLogsTableTableManager
                 Value<String> outcome = const Value.absent(),
                 Value<String?> failureReason = const Value.absent(),
                 Value<double?> bestSimilarity = const Value.absent(),
+                Value<double?> padScore = const Value.absent(),
                 Value<int> latencyMs = const Value.absent(),
               }) => VerificationLogsCompanion(
                 id: id,
@@ -1843,6 +1918,7 @@ class $$VerificationLogsTableTableManager
                 outcome: outcome,
                 failureReason: failureReason,
                 bestSimilarity: bestSimilarity,
+                padScore: padScore,
                 latencyMs: latencyMs,
               ),
           createCompanionCallback:
@@ -1853,6 +1929,7 @@ class $$VerificationLogsTableTableManager
                 required String outcome,
                 Value<String?> failureReason = const Value.absent(),
                 Value<double?> bestSimilarity = const Value.absent(),
+                Value<double?> padScore = const Value.absent(),
                 required int latencyMs,
               }) => VerificationLogsCompanion.insert(
                 id: id,
@@ -1861,6 +1938,7 @@ class $$VerificationLogsTableTableManager
                 outcome: outcome,
                 failureReason: failureReason,
                 bestSimilarity: bestSimilarity,
+                padScore: padScore,
                 latencyMs: latencyMs,
               ),
           withReferenceMapper: (p0) => p0

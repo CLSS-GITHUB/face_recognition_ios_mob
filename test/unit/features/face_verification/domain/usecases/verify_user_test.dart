@@ -457,6 +457,68 @@ void main() {
           reason: 'caller-supplied embedding must be wiped on return');
     });
 
+    test('padScore round-trips onto the granted log row', () async {
+      // F-10 instrumentation contract: the controller passes the
+      // per-attempt PAD score and the use case persists it on whichever
+      // log row this attempt produces. Without this the calibration
+      // study has nothing to learn from on grants — exactly the rows
+      // where a false-accept matters most.
+      final useCase = VerifyUser(
+        extractor: _FakeExtractor.returns(_eFor(0)),
+        matcher: matcher,
+        userSink: sink,
+        logRepo: logRepo,
+      );
+      final bank = _bank(<(User, Float32List)>[(_user('U1'), _eFor(0))]);
+      await useCase.call(
+        rgb112: _frame(),
+        templates: bank,
+        padScore: 0.07,
+      );
+      expect(logRepo.appended.single.outcome, VerificationOutcome.granted);
+      expect(logRepo.appended.single.padScore, closeTo(0.07, 1e-9));
+    });
+
+    test('padScore lands on noMatch denials too', () async {
+      // Probe orthogonal to the only template → noMatch denial. The
+      // calibration study needs PAD scores on denials *especially* to
+      // separate "PAD said spoof" from "no enrolled face matched" —
+      // they're different failure modes with different operational
+      // responses.
+      final useCase = VerifyUser(
+        extractor: _FakeExtractor.returns(_eFor(1)),
+        matcher: matcher,
+        userSink: sink,
+        logRepo: logRepo,
+      );
+      final bank = _bank(<(User, Float32List)>[(_user('U1'), _eFor(0))]);
+      await useCase.call(
+        rgb112: _frame(),
+        templates: bank,
+        padScore: 0.92,
+      );
+      expect(logRepo.appended.single.outcome, VerificationOutcome.denied);
+      expect(logRepo.appended.single.padScore, closeTo(0.92, 1e-9));
+    });
+
+    test('padScore defaults to null when the caller does not supply one',
+        () async {
+      // The use case's pre-F-10-instrumentation callers (and any
+      // call paths that bypass PAD — e.g. an attempt that errors
+      // before classify ran) must continue to write rows with
+      // pad_score = NULL, not a synthetic 0 that would corrupt the
+      // FRR/FAR histogram.
+      final useCase = VerifyUser(
+        extractor: _FakeExtractor.returns(_eFor(0)),
+        matcher: matcher,
+        userSink: sink,
+        logRepo: logRepo,
+      );
+      final bank = _bank(<(User, Float32List)>[(_user('U1'), _eFor(0))]);
+      await useCase.call(rgb112: _frame(), templates: bank);
+      expect(logRepo.appended.single.padScore, isNull);
+    });
+
     test('asserts exactly one of rgb112 / embedding is provided', () {
       final useCase = VerifyUser(
         extractor: _FakeExtractor.returns(_eFor(0)),

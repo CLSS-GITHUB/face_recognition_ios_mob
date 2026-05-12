@@ -883,6 +883,14 @@ class VerificationController extends AutoDisposeNotifier<VerificationState> {
         rgb112: rgb112,
         embedding: speculativeEmbedding,
         templates: flat,
+        // F-10 instrumentation: persist the per-attempt PAD score on
+        // whichever log row this attempt produces (granted, noMatch,
+        // error). NoOp emits 0.0 so today this is "PAD ran and saw a
+        // real face"; once a checkpoint lands it carries the model's
+        // actual verdict so the calibration study has data to work
+        // from. Spoof denials below have their own log path; this
+        // value never decides anything here, it only gets recorded.
+        padScore: padScore,
       );
 
       if (_disposed) return;
@@ -893,7 +901,15 @@ class VerificationController extends AutoDisposeNotifier<VerificationState> {
         // existing pipeline would have denied; it only ever takes one
         // away. NoOp returns 0.0 so this branch is dead when no real
         // checkpoint is bundled, preserving today's behaviour.
-        if (padScore > FaceThresholds.padSpoofThreshold) {
+        //
+        // Shadow mode (kPadPolicy == shadow) skips the veto entirely —
+        // the score still landed on the granted log row via the use
+        // case above so the calibration study has data, but the user-
+        // visible outcome stays as the pipeline decided. This is the
+        // deployment mode used to collect FRR/FAR before flipping the
+        // gate live.
+        if (kPadPolicy == PadPolicy.enforce &&
+            padScore > FaceThresholds.padSpoofThreshold) {
           _log.warning(
             'PAD veto: spoof score=$padScore exceeds threshold '
             '${FaceThresholds.padSpoofThreshold}; downgrading grant to spoof.',
@@ -901,6 +917,11 @@ class VerificationController extends AutoDisposeNotifier<VerificationState> {
           await _denyForSpoof(
             start: attemptStart,
             latencyMs: attemptStopwatch.elapsedMilliseconds,
+            // The score that triggered this veto goes on the log row
+            // so a calibration study can later separate "PAD vetoed
+            // a real face" from "PAD correctly rejected a spoof" via
+            // ground truth, not just the binary outcome.
+            padScore: padScore,
           );
           return;
         }
@@ -999,6 +1020,7 @@ class VerificationController extends AutoDisposeNotifier<VerificationState> {
   Future<void> _denyForSpoof({
     DateTime? start,
     int latencyMs = 0,
+    double? padScore,
   }) async {
     // UTC fallback so spoof denials match the timezone basis of grants
     // / regular denials. `start`, when provided, is already UTC because
@@ -1014,6 +1036,7 @@ class VerificationController extends AutoDisposeNotifier<VerificationState> {
         outcome: VerificationOutcome.spoof,
         failureReason: VerificationFailure.spoof.wireName,
         bestSimilarity: null,
+        padScore: padScore,
         latencyMs: latencyMs,
       ),
     );

@@ -71,6 +71,7 @@ class VerifyUser {
     Uint8List? rgb112,
     Float32List? embedding,
     required FlatTemplates templates,
+    double? padScore,
   }) async {
     assert(
       (rgb112 == null) != (embedding == null),
@@ -91,6 +92,7 @@ class VerifyUser {
           outcome: VerificationOutcome.denied,
           failureReason: VerificationFailure.noMatch.wireName,
           bestSimilarity: null,
+          padScore: padScore,
           latencyMs: latency,
         ),
       );
@@ -118,6 +120,7 @@ class VerifyUser {
           VerificationOutcome.error,
           VerificationFailure.extractionFailed,
           bestSimilarity: null,
+          padScore: padScore,
         );
       } on Object {
         // Anything else (busy, isolate-unavailable, runtime exception) maps
@@ -132,6 +135,7 @@ class VerifyUser {
           VerificationOutcome.error,
           VerificationFailure.error,
           bestSimilarity: null,
+          padScore: padScore,
         );
       }
     }
@@ -161,6 +165,7 @@ class VerifyUser {
           VerificationOutcome.denied,
           VerificationFailure.noMatch,
           bestSimilarity: null,
+          padScore: padScore,
         );
       }
 
@@ -179,6 +184,7 @@ class VerifyUser {
             at: start,
             outcome: VerificationOutcome.granted,
             bestSimilarity: best,
+            padScore: padScore,
             latencyMs: latency,
           ),
         );
@@ -198,6 +204,7 @@ class VerifyUser {
         VerificationOutcome.denied,
         VerificationFailure.noMatch,
         bestSimilarity: best,
+        padScore: padScore,
       );
     } finally {
       // Cheap (~192 stores) and runs on every exit path including
@@ -216,6 +223,7 @@ class VerifyUser {
     String outcome,
     VerificationFailure reason, {
     required double? bestSimilarity,
+    required double? padScore,
   }) async {
     final latency = stopwatch.elapsedMilliseconds;
     await _logRepo.append(
@@ -225,6 +233,7 @@ class VerifyUser {
         outcome: outcome,
         failureReason: reason.wireName,
         bestSimilarity: bestSimilarity,
+        padScore: padScore,
         latencyMs: latency,
       ),
     );

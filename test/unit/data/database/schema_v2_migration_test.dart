@@ -79,6 +79,9 @@ void main() {
         'failure_reason',
         'best_similarity',
         'latency_ms',
+        // v5 — F-10 instrumentation. Nullable so pre-v5 rows (and any
+        // attempt that short-circuits before PAD runs) read as NULL.
+        'pad_score',
       ]));
 
       // Index created.
@@ -187,6 +190,43 @@ void main() {
       expect(inserted.lastEnrolledAt!.isAtSameMomentAs(stamp), isTrue);
     });
 
+    test('v5 pad_score: NULL for migrated rows, settable for new rows',
+        () async {
+      // Seed a v4 database with a pre-existing verification_logs row
+      // missing pad_score, then open with the current schema. The
+      // v4→v5 step must `addColumn` (not `createTable`) so existing
+      // rows survive intact with NULL pad_score, and new inserts can
+      // round-trip a value.
+      final db = AppDatabase(_v4MemoryExecutor());
+      addTearDown(db.close);
+
+      final cols = await _columnNames(db, 'verification_logs');
+      expect(cols, contains('pad_score'));
+
+      final preserved = await db.customSelect(
+        "SELECT user_id, outcome, pad_score FROM verification_logs "
+        "WHERE user_id = 'U1'",
+      ).getSingle();
+      expect(preserved.read<String>('outcome'), 'granted');
+      expect(preserved.read<double?>('pad_score'), isNull,
+          reason: 'Pre-v5 rows must migrate with pad_score = NULL.');
+
+      await db.verificationLogDao.insertLog(
+        VerificationLogsCompanion.insert(
+          userId: const Value('U1'),
+          at: DateTime.utc(2026, 5, 12, 9, 0),
+          outcome: 'granted',
+          padScore: const Value(0.17),
+          latencyMs: 220,
+        ),
+      );
+      final fresh = await db.customSelect(
+        "SELECT pad_score FROM verification_logs "
+        "ORDER BY id DESC LIMIT 1",
+      ).getSingle();
+      expect(fresh.read<double?>('pad_score'), closeTo(0.17, 1e-6));
+    });
+
     test('purgeOlderThan deletes only old log rows', () async {
       final db = AppDatabase(_v1MemoryExecutor());
       addTearDown(db.close);
@@ -252,6 +292,73 @@ QueryExecutor _v1MemoryExecutor() {
       null,
     ]);
     seed.dispose();
+  });
+}
+
+/// Builds a v4 database (the schema immediately before the v5 pad_score
+/// column was added). Used to exercise the v4→v5 `addColumn` path
+/// directly, separate from the v1→latest createTable path covered
+/// above.
+QueryExecutor _v4MemoryExecutor() {
+  return NativeDatabase.memory(setup: (raw) {
+    raw.execute('PRAGMA user_version = 4');
+    // v4 users table: includes all post-v2/v3/v4 columns but is
+    // otherwise irrelevant to this test — verify-log is what changes
+    // at v5.
+    raw.execute('''
+      CREATE TABLE IF NOT EXISTS users (
+        user_id TEXT NOT NULL PRIMARY KEY,
+        name TEXT NOT NULL,
+        face_templates BLOB NOT NULL,
+        is_active INTEGER NOT NULL DEFAULT 1
+          CHECK ("is_active" IN (0, 1)),
+        image_path TEXT,
+        enrolled_at INTEGER,
+        last_verified_at INTEGER,
+        template_meta TEXT,
+        model_version INTEGER NOT NULL DEFAULT 0,
+        last_enrolled_at INTEGER
+      )
+    ''');
+    raw.execute('''
+      CREATE TABLE IF NOT EXISTS verification_logs (
+        id INTEGER NOT NULL PRIMARY KEY AUTOINCREMENT,
+        user_id TEXT,
+        at INTEGER NOT NULL,
+        outcome TEXT NOT NULL,
+        failure_reason TEXT,
+        best_similarity REAL,
+        latency_ms INTEGER NOT NULL,
+        FOREIGN KEY (user_id) REFERENCES users (user_id) ON DELETE SET NULL
+      )
+    ''');
+    raw.execute(
+      'CREATE INDEX IF NOT EXISTS idx_verification_logs_user_at '
+      'ON verification_logs (user_id, at DESC)',
+    );
+    // Seed a row through the pre-v5 schema (no pad_score) so the
+    // post-migration read can confirm NULL backfill.
+    final seedUser = raw.prepare(
+      'INSERT INTO users (user_id, name, face_templates, is_active) '
+      'VALUES (?, ?, ?, 1)',
+    );
+    seedUser.execute(<Object?>[
+      'U1',
+      'Alice',
+      Uint8List.fromList(<int>[0]),
+    ]);
+    seedUser.dispose();
+    final seedLog = raw.prepare(
+      'INSERT INTO verification_logs '
+      '(user_id, at, outcome, latency_ms) VALUES (?, ?, ?, ?)',
+    );
+    seedLog.execute(<Object?>[
+      'U1',
+      DateTime.utc(2026, 5, 10).millisecondsSinceEpoch ~/ 1000,
+      'granted',
+      120,
+    ]);
+    seedLog.dispose();
   });
 }
 

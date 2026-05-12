@@ -155,6 +155,51 @@ final embeddingExtractorProvider = Provider<EmbeddingExtractor>((ref) {
 const bool kPadEnabled =
     bool.fromEnvironment('PAD_ENABLED', defaultValue: false);
 
+/// Decides whether a high PAD spoof score actually vetoes a granted
+/// match, or whether the score is only logged for offline analysis.
+///
+/// - [enforce]: the F-10 scaffold's default. A score above
+///   `FaceThresholds.padSpoofThreshold` downgrades a grant to a spoof
+///   denial via `_denyForSpoof`. Strictly additive security.
+/// - [shadow]: the calibration-study deployment mode. PAD runs and the
+///   score lands in `verification_logs.pad_score`, but the controller
+///   never short-circuits on it — the user-visible outcome is whatever
+///   the rest of the pipeline decided. Lets a team ship a real
+///   checkpoint to the field and collect FRR/FAR data on the
+///   deployment population before flipping the gate live. Without this
+///   step the only way to calibrate `padSpoofThreshold` is to deploy
+///   the gate in enforce mode and hope the placeholder 0.5 doesn't
+///   over-reject — exactly the trap audit doc §9.4 calls out.
+enum PadPolicy { enforce, shadow }
+
+/// Selected via `--dart-define=PAD_POLICY=<enforce|shadow>`. Default is
+/// `enforce` so the scaffolded behaviour is preserved when the flag
+/// isn't set. Resolved (and any unrecognised value warned about) on
+/// first read via [kPadPolicy].
+const String _kPadPolicyName = String.fromEnvironment(
+  'PAD_POLICY',
+  defaultValue: 'enforce',
+);
+
+/// Resolved [PadPolicy]. Read it from the controller's hot path —
+/// resolution happens once, subsequent reads are a field load.
+PadPolicy get kPadPolicy {
+  final cached = _padPolicyCache;
+  if (cached != null) return cached;
+  for (final p in PadPolicy.values) {
+    if (p.name == _kPadPolicyName) {
+      return _padPolicyCache = p;
+    }
+  }
+  Logger('PadPolicy').warning(
+    'Unrecognised PAD_POLICY="$_kPadPolicyName"; falling back to enforce. '
+    'Accepted: ${PadPolicy.values.map((p) => p.name).join(', ')}',
+  );
+  return _padPolicyCache = PadPolicy.enforce;
+}
+
+PadPolicy? _padPolicyCache;
+
 /// Output-tensor contract for the bundled PAD checkpoint. Selected via
 /// `--dart-define=PAD_MODEL_KIND=<name>`. Accepted values match
 /// [PadModelKind] entries: `singleSigmoidScalar`, `binarySoftmax`,

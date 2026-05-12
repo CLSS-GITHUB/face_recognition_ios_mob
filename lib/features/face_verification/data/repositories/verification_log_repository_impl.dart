@@ -23,6 +23,7 @@ class VerificationLogRepositoryImpl implements VerificationLogRepository {
         outcome: log.outcome,
         failureReason: Value(log.failureReason),
         bestSimilarity: Value(log.bestSimilarity),
+        padScore: Value(log.padScore),
         latencyMs: log.latencyMs,
       ),
     );
