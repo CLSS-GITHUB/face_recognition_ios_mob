@@ -178,7 +178,7 @@ class EnrollmentController extends AutoDisposeNotifier<EnrollmentState> {
         state.stage == EnrollmentStage.registration) {
       return;
     }
-    final detector = ref.read(faceDetectionServiceProvider);
+    final detector = ref.read(enrollmentFaceDetectionServiceProvider);
     List<FaceData> faces;
     try {
       faces = await detector.detect(forMlKit).timeout(

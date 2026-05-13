@@ -1,7 +1,10 @@
+import 'dart:async';
 import 'dart:io';
 
 import 'package:camera/camera.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
+import 'package:google_mlkit_face_detection/google_mlkit_face_detection.dart'
+    show FaceDetectorMode, FaceDetectorOptions;
 import 'package:logging/logging.dart';
 
 import '../constants/thresholds.dart';
@@ -31,6 +34,7 @@ import '../platform/rate_limiter.dart';
 import '../platform/security_check.dart';
 import '../platform/tts_announcer.dart';
 import '../security/template_crypto.dart';
+import '../storage/delegate_cache.dart';
 
 /// Application-lifetime database singleton.
 final dbProvider = Provider<AppDatabase>((ref) {
@@ -70,8 +74,39 @@ final templateCryptoProvider = Provider<TemplateCrypto>((_) => TemplateCrypto())
 /// ML Kit face detector — app-lifetime singleton. (Was autoDispose; that
 /// caused the detector to get closed between frames during enrollment,
 /// hanging every `processImage` call.)
+///
+/// Performance mode: `fast`. The verify hot path runs at ~30 fps and the
+/// fast detector's 30-55 ms / frame is the only setting that keeps the
+/// camera preview smooth — see analysis report §7.4 (the accurate mode
+/// adds ~40-80 ms per frame, which would stall the stream).
 final faceDetectionServiceProvider = Provider<FaceDetectionService>((ref) {
   final s = FaceDetectionService();
+  ref.onDispose(s.dispose);
+  return s;
+});
+
+/// A4: enrollment-only detector that runs in ML Kit `accurate` mode for
+/// higher-precision landmarks during template capture. Enrollment is
+/// user-bound (a 15-30 s liveness flow happens once per user), so the
+/// per-frame cost of accurate mode is not on a hot path. The cleaner
+/// landmark positions feed `FramePreparation`'s eye-axis alignment and
+/// produce a more discriminative template at the cost of ~40-80 ms /
+/// frame ML Kit latency. The verify side keeps the fast singleton above.
+///
+/// `autoDispose` so the second native blob is freed when /enroll/live is
+/// torn down — a single-user device that enrolls once and verifies for
+/// 30 days doesn't pay the memory premium between enrollments.
+final enrollmentFaceDetectionServiceProvider =
+    Provider.autoDispose<FaceDetectionService>((ref) {
+  final s = FaceDetectionService(
+    options: FaceDetectorOptions(
+      performanceMode: FaceDetectorMode.accurate,
+      enableLandmarks: true,
+      enableClassification: true,
+      enableTracking: true,
+      minFaceSize: 0.10,
+    ),
+  );
   ref.onDispose(s.dispose);
   return s;
 });
@@ -135,11 +170,44 @@ final userBankRevisionProvider = StateProvider<int>((_) => 0);
 //
 // See docs/verification/architecture_recommendations.md §2.3.
 
+/// A3: per-device cache of the last validated TFLite delegate choice.
+/// Backed by the same secure-storage adapter the rate limiter uses so
+/// an adversary clearing app documents cannot reset it. See
+/// [DelegateCache] for the persistence contract and TTL.
+final delegateCacheProvider = Provider<DelegateCache>((ref) {
+  return DelegateCache(storage: ref.watch(secureStorageProvider));
+});
+
 /// Long-lived TFLite isolate. `keepAlive` so the spawn cost (≈80 ms cold) is
 /// paid once per app process, not per screen.
+///
+/// A3: before spawning, read the cached delegate label and hand it to
+/// the isolate as a "start the chain here" hint. The isolate still
+/// validates the cached tier against a CPU golden — a driver update
+/// that broke FP fusion is the scenario the gate exists for — and
+/// falls through to the remaining tiers on failure exactly as on a
+/// cold cache. After spawn we write the final simple label back so
+/// subsequent cold starts skip earlier-tier trials.
 final embeddingIsolateProvider = FutureProvider<EmbeddingIsolate>((ref) async {
-  final iso = await EmbeddingIsolate.spawn();
+  final cache = ref.read(delegateCacheProvider);
+  final preferred = await cache.read(modelVersion: FaceThresholds.modelVersion);
+  final iso = await EmbeddingIsolate.spawn(preferredDelegate: preferred);
   ref.onDispose(iso.close);
+
+  // Persist the winning tier so the next cold start can skip earlier
+  // trials. We write the *simple* label — decorated forms like
+  // `cpu(gpu-validation-fail:…)` are pruned to `cpu`, and unknown
+  // labels (`stub` from tests, hypothetical future tags) are ignored.
+  // Fire-and-forget — the cache write must never block extract
+  // availability, and a write failure just means the next cold start
+  // pays the full chain cost (the exact pre-A3 baseline).
+  final simple = DelegateCache.simpleLabelOrNull(iso.delegateLabel);
+  if (simple != null) {
+    unawaited(cache.write(
+      label: simple,
+      modelVersion: FaceThresholds.modelVersion,
+    ));
+  }
   return iso;
 });
 

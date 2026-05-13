@@ -45,10 +45,11 @@ class EmbeddingIsolate {
   }
 
   /// Human-readable identifier of the TFLite execution path actually in
-  /// use. One of `"xnnpack"`, `"cpu"`, `"cpu(xnnpack-validation-fail:…)"`,
-  /// `"cpu(xnnpack-construct-fail:…)"`, or `"stub"` in test mode.
-  /// Surfaced to /debug/health so a field operator can tell which path
-  /// the device ended up on without an interactive debugger.
+  /// use. One of `"gpu"`, `"nnapi"`, `"xnnpack"`, `"cpu"`,
+  /// `"cpu(<reason>|<reason>...)"` when every accelerator failed, or
+  /// `"stub"` in test mode. Surfaced to /debug/health so a field operator
+  /// can tell which path the device ended up on without an interactive
+  /// debugger.
   final String delegateLabel;
 
   static const int _bytesExpected =
@@ -71,12 +72,21 @@ class EmbeddingIsolate {
   /// Production entry point: loads the bundled TFLite asset on the host
   /// isolate and hands the bytes off to the worker. Typically wired through
   /// a `keepAlive` Riverpod provider so the spawn cost is paid once.
-  static Future<EmbeddingIsolate> spawn() async {
+  ///
+  /// [preferredDelegate] — A3 cache hint. When non-null and one of
+  /// `'gpu' | 'nnapi' | 'xnnpack' | 'cpu'`, the worker starts the
+  /// validation chain at that tier instead of from the top, skipping
+  /// earlier tiers without trialling them. Unknown values are ignored
+  /// and the worker runs the full chain. Letting the host pass this
+  /// hint avoids paying ~100-260 ms of GPU/NNAPI trial cost on every
+  /// cold start when the previous launch already picked a winner — see
+  /// `DelegateCache` for the persistence contract.
+  static Future<EmbeddingIsolate> spawn({String? preferredDelegate}) async {
     try {
       final modelData = await rootBundle.load(_modelAsset);
       final modelBytes = modelData.buffer
           .asUint8List(modelData.offsetInBytes, modelData.lengthInBytes);
-      return spawnWithBytes(modelBytes);
+      return spawnWithBytes(modelBytes, preferredDelegate: preferredDelegate);
     } catch (e, st) {
       _log.severe('Failed to load TFLite model bytes', e, st);
       throw EmbeddingIsolateUnavailableError(
@@ -87,9 +97,14 @@ class EmbeddingIsolate {
 
   /// Lower-level entry point used by `spawn` and any caller that wants to
   /// supply pre-loaded model bytes (e.g. an integration test that ships a
-  /// fixture model).
-  static Future<EmbeddingIsolate> spawnWithBytes(Uint8List modelBytes) {
-    return _spawnWithConfig(_IsolateConfig.tflite(modelBytes));
+  /// fixture model). [preferredDelegate] semantics match [spawn].
+  static Future<EmbeddingIsolate> spawnWithBytes(
+    Uint8List modelBytes, {
+    String? preferredDelegate,
+  }) {
+    return _spawnWithConfig(
+      _IsolateConfig.tflite(modelBytes, preferredDelegate: preferredDelegate),
+    );
   }
 
   /// Test-only entry point. The worker uses a deterministic stub embedder
@@ -283,21 +298,33 @@ class _IsolateConfig {
     required this.useTflite,
     required this.modelBytes,
     required this.stubLatency,
+    required this.preferredDelegate,
   });
-  factory _IsolateConfig.tflite(Uint8List bytes) => _IsolateConfig._(
+  factory _IsolateConfig.tflite(
+    Uint8List bytes, {
+    String? preferredDelegate,
+  }) =>
+      _IsolateConfig._(
         useTflite: true,
         modelBytes: bytes,
         stubLatency: Duration.zero,
+        preferredDelegate: preferredDelegate,
       );
   factory _IsolateConfig.stub(Duration latency) => _IsolateConfig._(
         useTflite: false,
         modelBytes: Uint8List(0),
         stubLatency: latency,
+        preferredDelegate: null,
       );
 
   final bool useTflite;
   final Uint8List modelBytes;
   final Duration stubLatency;
+
+  /// A3 cache hint: validate-and-skip target tier passed from the host's
+  /// `DelegateCache`. Null / unrecognised values mean "run the full
+  /// chain from the top".
+  final String? preferredDelegate;
 }
 
 class _IsolateInitFailure {
@@ -384,6 +411,7 @@ Future<void> _isolateMain(_SpawnArgs args) async {
       args.config.modelBytes,
       reusableInput,
       reusableOutput,
+      preferredDelegate: args.config.preferredDelegate,
     );
     if (result.failure != null) {
       args.replyTo.send(_IsolateInitFailure(result.failure!));
@@ -510,21 +538,39 @@ class _SelectionResult {
   final String? failure;
 }
 
-/// Builds the live interpreter for this isolate, preferring XNNPACK and
-/// falling back to plain CPU when the delegate either won't construct or
-/// disagrees with the CPU reference on a deterministic test vector.
+/// Builds the live interpreter for this isolate, preferring fastest-tier
+/// accelerators and falling back to plain CPU when a tier either won't
+/// construct or disagrees with the CPU reference on a deterministic
+/// test vector.
 ///
-/// XNNPACK is well-behaved for FP32 dense ops on every modern ARM chip,
-/// but the only way to be *sure* an enrolled template (extracted by CPU
-/// pre-upgrade) and a probe (extracted by XNNPACK post-upgrade) end up
-/// in the same feature space is to compare outputs on the same input.
-/// We require cosine ≥ 0.999 — a few ulps of FP drift is fine, a wrong
-/// op-fusion that flips an axis is not.
+/// XNNPACK / NNAPI / GpuDelegateV2 are well-behaved for FP32 dense ops
+/// on most modern ARM chips, but the only way to be *sure* an enrolled
+/// template (extracted by CPU pre-upgrade) and a probe (extracted by a
+/// delegate post-upgrade) end up in the same feature space is to
+/// compare outputs on the same input. We require cosine ≥ 0.999 — a
+/// few ulps of FP drift is fine, a wrong op-fusion that flips an axis
+/// is not.
+///
+/// A3: [preferredDelegate] lets the host skip earlier tiers when a
+/// prior cold start already picked a winner. We still run the full
+/// validation (CPU golden + cosine gate) on the cached tier — a driver
+/// update that broke FP fusion is exactly the scenario the gate
+/// catches — and we still fall through to lower tiers on failure.
+/// Unknown values are ignored. The tiers are ranked 0=gpu, 1=nnapi,
+/// 2=xnnpack, 3=cpu so we can express "start the chain at tier N".
 _SelectionResult _selectInterpreter(
   Uint8List modelBytes,
   List<List<List<List<double>>>> reusableInput,
-  List<List<double>> reusableOutput,
-) {
+  List<List<double>> reusableOutput, {
+  String? preferredDelegate,
+}) {
+  const Map<String, int> tierIndex = <String, int>{
+    'gpu': 0,
+    'nnapi': 1,
+    'xnnpack': 2,
+    'cpu': 3,
+  };
+  final int startTier = tierIndex[preferredDelegate] ?? 0;
   // 1. Baseline CPU interpreter — also validates model output shape.
   Interpreter cpu;
   try {
@@ -577,9 +623,10 @@ _SelectionResult _selectInterpreter(
   }
 
   // 3. Try delegates in order of expected speed: GPU (Android only) →
-  //    XNNPACK → plain CPU. Each trial reuses the same CPU golden and
-  //    the cosine ≥ 0.999 gate; failures get folded into the label so
-  //    /debug/health tells the field operator which path won.
+  //    NNAPI (Android only) → XNNPACK → plain CPU. Each trial reuses
+  //    the same CPU golden and the cosine ≥ 0.999 gate; failures get
+  //    folded into the label so /debug/health tells the field operator
+  //    which path won.
   final failures = <String>[];
 
   // 3a. GPU (Android only). tflite_flutter exposes GpuDelegateV2 which
@@ -589,7 +636,7 @@ _SelectionResult _selectInterpreter(
   //     On iOS this path is skipped — the GPU backend there is Metal /
   //     CoreML and routes through a different setter on
   //     InterpreterOptions (out of scope for this commit).
-  if (Platform.isAndroid) {
+  if (Platform.isAndroid && startTier <= 0) {
     final gpuTrial = _tryDelegate(
       modelBytes: modelBytes,
       goldenCpu: goldenCpu,
@@ -610,42 +657,86 @@ _SelectionResult _selectInterpreter(
     failures.add(gpuTrial.failureReason!);
   }
 
-  // 3b. XNNPACK. CPU SIMD path; well-behaved on essentially every ARM
-  //     chip. ~8–12 ms / extract win over plain CPU; no precision risk.
-  final xnnTrial = _tryDelegate(
-    modelBytes: modelBytes,
-    goldenCpu: goldenCpu,
-    testBytes: testBytes,
-    reusableInput: reusableInput,
-    reusableOutput: reusableOutput,
-    name: 'xnnpack',
-    buildDelegate: () => XNNPackDelegate(
-      options: XNNPackDelegateOptions(
-        numThreads: FaceThresholds.tfliteThreads,
-      ),
-    ),
-  );
-  if (xnnTrial.success) {
-    cpu.close();
-    final label = failures.isEmpty
-        ? 'xnnpack'
-        : 'xnnpack(after:${failures.join('|')})';
-    return _SelectionResult.success(
-      interpreter: xnnTrial.interpreter!,
-      delegate: xnnTrial.delegate,
-      label: label,
+  // 3b. NNAPI (Android only). Routes inference through Android's
+  //     Neural Networks API, which dispatches to whatever accelerator
+  //     the device exposes (NPU on Pixel Tensor, Hexagon DSP on
+  //     Qualcomm, APU on MediaTek). Frequently faster than XNNPACK on
+  //     mid-range chips that lack a usable GpuDelegate path, and on
+  //     flagship hardware lands a per-extract win independent of GPU.
+  //
+  //     NNAPI is *not* a Delegate object in tflite_flutter 0.11.0 — it
+  //     is a flag on InterpreterOptions
+  //     (`useNnApiForAndroid = true`, see
+  //     interpreter_options.dart:51), so it can't share the
+  //     `_tryDelegate` helper. The validation contract (CPU golden,
+  //     cosine ≥ 0.999) is identical — same failure modes (driver
+  //     op-fusion bugs flipping outputs) — so it gets the same gate.
+  if (Platform.isAndroid && startTier <= 1) {
+    final nnapiTrial = _tryNnApi(
+      modelBytes: modelBytes,
+      goldenCpu: goldenCpu,
+      testBytes: testBytes,
+      reusableInput: reusableInput,
+      reusableOutput: reusableOutput,
     );
+    if (nnapiTrial.success) {
+      cpu.close();
+      final label = failures.isEmpty
+          ? 'nnapi'
+          : 'nnapi(after:${failures.join('|')})';
+      return _SelectionResult.success(
+        interpreter: nnapiTrial.interpreter!,
+        delegate: null,
+        label: label,
+      );
+    }
+    failures.add(nnapiTrial.failureReason!);
   }
-  failures.add(xnnTrial.failureReason!);
 
-  // 3c. Both delegates failed. Keep the validation CPU as the live
-  //     interpreter and report every failure so the field can decide
-  //     whether it's a vendor-driver issue (GPU) or a model/op-fusion
-  //     issue (XNNPACK).
+  // 3c. XNNPACK. CPU SIMD path; well-behaved on essentially every ARM
+  //     chip. ~8–12 ms / extract win over plain CPU; no precision risk.
+  if (startTier <= 2) {
+    final xnnTrial = _tryDelegate(
+      modelBytes: modelBytes,
+      goldenCpu: goldenCpu,
+      testBytes: testBytes,
+      reusableInput: reusableInput,
+      reusableOutput: reusableOutput,
+      name: 'xnnpack',
+      buildDelegate: () => XNNPackDelegate(
+        options: XNNPackDelegateOptions(
+          numThreads: FaceThresholds.tfliteThreads,
+        ),
+      ),
+    );
+    if (xnnTrial.success) {
+      cpu.close();
+      final label = failures.isEmpty
+          ? 'xnnpack'
+          : 'xnnpack(after:${failures.join('|')})';
+      return _SelectionResult.success(
+        interpreter: xnnTrial.interpreter!,
+        delegate: xnnTrial.delegate,
+        label: label,
+      );
+    }
+    failures.add(xnnTrial.failureReason!);
+  }
+
+  // 3d. Every accelerator failed (or every accelerator was skipped via
+  //     the A3 cache hint pointing straight at CPU). Keep the
+  //     validation CPU as the live interpreter and report every
+  //     failure so the field can decide whether it's a vendor-driver
+  //     issue (GPU/NNAPI) or a model/op-fusion issue (XNNPACK). When
+  //     nothing failed (cache said `cpu` and we honoured it) the label
+  //     stays bare `cpu` — the absence of decorations is the signal
+  //     that this was a deliberate choice, not a fallback after
+  //     everything broke.
+  final cpuLabel = failures.isEmpty ? 'cpu' : 'cpu(${failures.join('|')})';
   return _SelectionResult.success(
     interpreter: cpu,
     delegate: null,
-    label: 'cpu(${failures.join('|')})',
+    label: cpuLabel,
   );
 }
 
@@ -718,6 +809,53 @@ _DelegateTrialResult _tryDelegate({
   } catch (_) {}
   return _DelegateTrialResult.failure(
     '$name-validation-fail:${sim.toStringAsFixed(4)}',
+  );
+}
+
+/// Constructs an NNAPI-backed interpreter and runs it through the same
+/// CPU-golden validation [_tryDelegate] uses for GPU/XNNPACK. NNAPI is
+/// surfaced by tflite_flutter as `InterpreterOptions.useNnApiForAndroid`
+/// (a flag, see interpreter_options.dart:51) rather than as a `Delegate`
+/// object, so the boilerplate is similar but distinct: no `Delegate?` to
+/// build or tear down on failure.
+///
+/// Validation gate is intentionally identical (cosine ≥ 0.999): a vendor
+/// NN driver that fuses ops differently from CPU produces drift the
+/// matcher cannot tolerate against templates extracted on the old path,
+/// and the only safe response is to fall through to the next tier.
+_DelegateTrialResult _tryNnApi({
+  required Uint8List modelBytes,
+  required Float32List goldenCpu,
+  required Uint8List testBytes,
+  required List<List<List<List<double>>>> reusableInput,
+  required List<List<double>> reusableOutput,
+}) {
+  Interpreter? interp;
+  try {
+    final opts = InterpreterOptions()
+      ..threads = FaceThresholds.tfliteThreads
+      ..useNnApiForAndroid = true;
+    interp = Interpreter.fromBuffer(modelBytes, options: opts);
+  } catch (e) {
+    return _DelegateTrialResult.failure('nnapi-construct-fail:$e');
+  }
+
+  Float32List output;
+  try {
+    output = _runTfliteInto(interp, testBytes, reusableInput, reusableOutput);
+  } catch (e) {
+    interp.close();
+    return _DelegateTrialResult.failure('nnapi-infer-fail:$e');
+  }
+
+  final sim = _cosineL2Normalised(goldenCpu, output);
+  if (sim >= 0.999) {
+    return _DelegateTrialResult.success(interp, null);
+  }
+
+  interp.close();
+  return _DelegateTrialResult.failure(
+    'nnapi-validation-fail:${sim.toStringAsFixed(4)}',
   );
 }
 
