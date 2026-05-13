@@ -1,4 +1,5 @@
 import 'package:flutter/foundation.dart';
+import 'package:flutter/widgets.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:go_router/go_router.dart';
 
@@ -62,7 +63,34 @@ final routerProvider = Provider<GoRouter>((ref) {
       ),
       GoRoute(
         path: '/verify',
-        builder: (_, _) => const VerificationScreen(),
+        // Custom fast fade in place of Material's default route
+        // transition (~250-300 ms slide + fade per audit doc §2.1 stage
+        // 2). The verify screen is latency-sensitive — the user already
+        // tapped a CTA labelled "Verify Identity" and is staring at the
+        // screen waiting for the camera. Material's 300 ms slide is the
+        // single largest visible-but-non-pipeline cost on the cold path
+        // and is the only stage that runs whether or not prewarm landed.
+        // 100 ms fade in / 120 ms fade out: short enough to feel
+        // immediate, long enough to read as a deliberate transition
+        // (zero-duration looks like a glitch on most platforms). The
+        // asymmetric reverse keeps the dismissal feeling controlled
+        // rather than abrupt when the user backs out.
+        pageBuilder: (context, state) => CustomTransitionPage<void>(
+          key: state.pageKey,
+          child: const VerificationScreen(),
+          transitionDuration: const Duration(milliseconds: 100),
+          reverseTransitionDuration: const Duration(milliseconds: 120),
+          transitionsBuilder:
+              (context, animation, secondaryAnimation, child) {
+            return FadeTransition(
+              opacity: CurvedAnimation(
+                parent: animation,
+                curve: Curves.easeOut,
+              ),
+              child: child,
+            );
+          },
+        ),
       ),
       GoRoute(
         path: '/manage',
