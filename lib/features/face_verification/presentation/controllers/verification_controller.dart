@@ -22,6 +22,7 @@ import '../../domain/entities/liveness_step.dart';
 import '../../domain/entities/quality_result.dart';
 import '../../domain/entities/user.dart';
 import '../../../../services/device_motion_detector.dart';
+import '../../../../services/gabor_texture_detector.dart';
 import '../../../../services/motion_variance_detector.dart';
 import '../../../../services/screen_reflection_detector.dart';
 import '../../domain/entities/verification_failure.dart';
@@ -163,6 +164,14 @@ class VerificationController extends AutoDisposeNotifier<VerificationState> {
   /// — phone-on-phone replay produces unnaturally vivid + bright pixels.
   /// Stateless; see §7.3.
   static const _screenReflection = ScreenReflectionDetector();
+
+  /// B3: directional-energy texture gate. Catches print / replay
+  /// attacks the colour-based [_screenReflection] gate misses — matte
+  /// printouts with realistic skin tones land inside the sat/luma
+  /// envelope but show anisotropic micro-texture from paper grain or
+  /// LCD subpixel stripes. Stateless; sub-millisecond. See
+  /// `services/gabor_texture_detector.dart`.
+  static const _gabor = GaborTextureDetector();
 
   /// Restarted on every frame; if it fires, the camera stream stalled
   /// (architecture §3.2 step 2 / §3.4 frameStaleMs).
@@ -681,6 +690,7 @@ class VerificationController extends AutoDisposeNotifier<VerificationState> {
       // "this frame isn't a good speculation candidate" — not as denies
       // or spoof flags. The slow path will re-evaluate on its own frame.
       if (_screenReflection.isLikelyScreen(rgb112)) return;
+      if (_gabor.isLikelySpoofTexture(rgb112)) return;
       final blur = BlurMetric.varianceOfLaplacian(
         rgb112,
         FaceThresholds.inputSize,
@@ -824,6 +834,28 @@ class VerificationController extends AutoDisposeNotifier<VerificationState> {
         // this gate at cache time, so the fast path can skip it.)
         if (_screenReflection.isLikelyScreen(rgb112)) {
           _log.warning('Spoof: screen reflection signal — denying.');
+          await _denyForSpoof(
+            start: attemptStart,
+            latencyMs: attemptStopwatch.elapsedMilliseconds,
+          );
+          return;
+        }
+
+        // B3: directional-energy texture gate. Catches print + screen
+        // attacks that pass the colour check above — matte printouts
+        // and well-balanced LCD captures match real-skin colour
+        // statistics but show anisotropic micro-texture the colour
+        // gate is blind to. Same enforcement level (deny on fire);
+        // logged at warning so /debug/health calibration tooling
+        // can surface the trigger rate.
+        final gaborResult = _gabor.scoreAnisotropy(rgb112);
+        if (!gaborResult.isDegenerate &&
+            gaborResult.score > GaborTextureDetector.anisotropyThreshold) {
+          _log.warning(
+            'Spoof: Gabor texture anisotropy '
+            '${gaborResult.score.toStringAsFixed(3)} above '
+            '${GaborTextureDetector.anisotropyThreshold} — denying.',
+          );
           await _denyForSpoof(
             start: attemptStart,
             latencyMs: attemptStopwatch.elapsedMilliseconds,
