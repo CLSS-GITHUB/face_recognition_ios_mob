@@ -47,4 +47,28 @@ class VerificationLogDao extends DatabaseAccessor<AppDatabase>
     return (delete(verificationLogs)..where((t) => t.at.isSmallerThanValue(cutoff)))
         .go();
   }
+
+  /// C2: count-bounded retention sweep. Keeps the [maxRows] most-recent
+  /// rows (ordered by `at` descending) and deletes the rest. Run on app
+  /// start alongside [purgeOlderThan].
+  ///
+  /// Implementation uses `NOT IN (SELECT … ORDER BY at DESC LIMIT N)` —
+  /// Drift's query builder can't compose this in typed form, but the
+  /// SQL is straightforward and benefits from the existing
+  /// `idx_verification_logs_user_at` covering index. `maxRows = 0`
+  /// deletes everything (the inner SELECT matches nothing → NOT IN is
+  /// always true). Negative inputs are rejected — the caller has a
+  /// programming error, not a runtime condition the DB should paper
+  /// over.
+  Future<int> purgeBeyondCount(int maxRows) {
+    if (maxRows < 0) {
+      throw ArgumentError.value(maxRows, 'maxRows', 'must be >= 0');
+    }
+    return customUpdate(
+      'DELETE FROM verification_logs WHERE id NOT IN ('
+      'SELECT id FROM verification_logs ORDER BY at DESC LIMIT ?)',
+      variables: <Variable>[Variable.withInt(maxRows)],
+      updates: <TableInfo>{verificationLogs},
+    );
+  }
 }

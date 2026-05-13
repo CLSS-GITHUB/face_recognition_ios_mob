@@ -7,8 +7,11 @@ import 'package:flutter_test/flutter_test.dart';
 
 class _FakeLogRepo implements VerificationLogRepository {
   DateTime? lastCutoff;
-  int returnRowsRemoved = 0;
-  Object? throwOnPurge;
+  int? lastMaxRows;
+  int returnAgeRowsRemoved = 0;
+  int returnCountRowsRemoved = 0;
+  Object? throwOnAgePurge;
+  Object? throwOnCountPurge;
 
   @override
   Future<void> append(VerificationLog log) async {}
@@ -16,8 +19,15 @@ class _FakeLogRepo implements VerificationLogRepository {
   @override
   Future<int> purgeOlderThan(DateTime cutoff) async {
     lastCutoff = cutoff;
-    if (throwOnPurge != null) throw throwOnPurge!;
-    return returnRowsRemoved;
+    if (throwOnAgePurge != null) throw throwOnAgePurge!;
+    return returnAgeRowsRemoved;
+  }
+
+  @override
+  Future<int> purgeBeyondCount(int maxRows) async {
+    lastMaxRows = maxRows;
+    if (throwOnCountPurge != null) throw throwOnCountPurge!;
+    return returnCountRowsRemoved;
   }
 }
 
@@ -25,7 +35,7 @@ void main() {
   test(
       'verificationLogPurgeProvider calls purgeOlderThan with the configured cutoff',
       () async {
-    final fake = _FakeLogRepo()..returnRowsRemoved = 7;
+    final fake = _FakeLogRepo()..returnAgeRowsRemoved = 7;
     final container = ProviderContainer(overrides: [
       verificationLogRepositoryProvider.overrideWithValue(fake),
     ]);
@@ -57,9 +67,67 @@ void main() {
     );
   });
 
-  test('verificationLogPurgeProvider swallows errors and returns 0', () async {
+  test(
+      'verificationLogPurgeProvider calls purgeBeyondCount with verificationLogMaxRows',
+      () async {
+    final fake = _FakeLogRepo()..returnCountRowsRemoved = 3;
+    final container = ProviderContainer(overrides: [
+      verificationLogRepositoryProvider.overrideWithValue(fake),
+    ]);
+    addTearDown(container.dispose);
+
+    await container.read(verificationLogPurgeProvider.future);
+    expect(fake.lastMaxRows, FaceThresholds.verificationLogMaxRows);
+  });
+
+  test('verificationLogPurgeProvider sums removals across both passes',
+      () async {
+    final fake = _FakeLogRepo()
+      ..returnAgeRowsRemoved = 5
+      ..returnCountRowsRemoved = 12;
+    final container = ProviderContainer(overrides: [
+      verificationLogRepositoryProvider.overrideWithValue(fake),
+    ]);
+    addTearDown(container.dispose);
+
+    final removed = await container.read(verificationLogPurgeProvider.future);
+    expect(removed, 17);
+  });
+
+  test('age-purge failure does not lose count-purge result', () async {
+    // The two passes are independently wrapped: if the age sweep
+    // throws, the count sweep still runs and its contribution is
+    // returned.
+    final fake = _FakeLogRepo()
+      ..throwOnAgePurge = StateError('age sweep failed')
+      ..returnCountRowsRemoved = 42;
+    final container = ProviderContainer(overrides: [
+      verificationLogRepositoryProvider.overrideWithValue(fake),
+    ]);
+    addTearDown(container.dispose);
+
+    final removed = await container.read(verificationLogPurgeProvider.future);
+    expect(removed, 42);
+  });
+
+  test('count-purge failure does not lose age-purge result', () async {
+    final fake = _FakeLogRepo()
+      ..returnAgeRowsRemoved = 9
+      ..throwOnCountPurge = StateError('count sweep failed');
+    final container = ProviderContainer(overrides: [
+      verificationLogRepositoryProvider.overrideWithValue(fake),
+    ]);
+    addTearDown(container.dispose);
+
+    final removed = await container.read(verificationLogPurgeProvider.future);
+    expect(removed, 9);
+  });
+
+  test('both passes failing → returns 0', () async {
     // Maintenance must never block app start. A db hiccup → returns 0.
-    final fake = _FakeLogRepo()..throwOnPurge = StateError('db locked');
+    final fake = _FakeLogRepo()
+      ..throwOnAgePurge = StateError('db locked')
+      ..throwOnCountPurge = StateError('db still locked');
     final container = ProviderContainer(overrides: [
       verificationLogRepositoryProvider.overrideWithValue(fake),
     ]);

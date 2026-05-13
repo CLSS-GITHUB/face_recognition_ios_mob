@@ -138,6 +138,81 @@ void main() {
     expect(remaining.read<int>('c'), 1);
   });
 
+  test('purgeBeyondCount keeps the N newest rows by `at`', () async {
+    // Insert 5 rows at increasing timestamps; keep the 2 newest.
+    final base = DateTime.utc(2026, 5, 10);
+    for (var i = 0; i < 5; i++) {
+      await db.verificationLogDao.insertLog(
+        VerificationLogsCompanion.insert(
+          userId: const Value('U1'),
+          at: base.add(Duration(minutes: i)),
+          outcome: 'granted',
+          latencyMs: i,
+        ),
+      );
+    }
+
+    final removed = await db.verificationLogDao.purgeBeyondCount(2);
+    expect(removed, 3, reason: '5 inserted - 2 kept = 3 removed');
+
+    // The 2 remaining must be the newest pair (latencyMs 3 and 4 by
+    // construction).
+    final rows = await db
+        .customSelect(
+          'SELECT latency_ms FROM verification_logs ORDER BY at DESC',
+        )
+        .get();
+    expect(rows, hasLength(2));
+    expect(rows[0].read<int>('latency_ms'), 4);
+    expect(rows[1].read<int>('latency_ms'), 3);
+  });
+
+  test('purgeBeyondCount with maxRows >= count is a no-op', () async {
+    final base = DateTime.utc(2026, 5, 10);
+    for (var i = 0; i < 3; i++) {
+      await db.verificationLogDao.insertLog(
+        VerificationLogsCompanion.insert(
+          userId: const Value('U1'),
+          at: base.add(Duration(minutes: i)),
+          outcome: 'granted',
+          latencyMs: i,
+        ),
+      );
+    }
+
+    final removed = await db.verificationLogDao.purgeBeyondCount(10);
+    expect(removed, 0);
+    final row = await db
+        .customSelect('SELECT COUNT(*) AS c FROM verification_logs')
+        .getSingle();
+    expect(row.read<int>('c'), 3);
+  });
+
+  test('purgeBeyondCount(0) deletes everything', () async {
+    await db.verificationLogDao.insertLog(
+      VerificationLogsCompanion.insert(
+        userId: const Value('U1'),
+        at: DateTime.utc(2026, 5, 10),
+        outcome: 'granted',
+        latencyMs: 1,
+      ),
+    );
+
+    final removed = await db.verificationLogDao.purgeBeyondCount(0);
+    expect(removed, 1);
+  });
+
+  test('purgeBeyondCount on an empty table is a no-op', () async {
+    expect(await db.verificationLogDao.purgeBeyondCount(100), 0);
+  });
+
+  test('purgeBeyondCount rejects negative maxRows', () async {
+    expect(
+      () => db.verificationLogDao.purgeBeyondCount(-1),
+      throwsArgumentError,
+    );
+  });
+
   test('null userId is allowed (spoof / no-match paths)', () async {
     await db.verificationLogDao.insertLog(
       VerificationLogsCompanion.insert(

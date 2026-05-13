@@ -115,6 +115,9 @@ class _FakeLogRepo implements VerificationLogRepository {
     purgeCalls++;
     return 0;
   }
+
+  @override
+  Future<int> purgeBeyondCount(int maxRows) async => 0;
 }
 
 void main() {

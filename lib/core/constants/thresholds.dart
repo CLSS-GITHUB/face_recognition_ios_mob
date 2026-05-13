@@ -138,6 +138,15 @@ class FaceThresholds {
   /// without losing the recent history Manage Users displays.
   static const int verificationLogRetentionDays = 30;
 
+  /// C2: hard upper bound on `verification_logs` row count. A heavy-use
+  /// device (~1000+ verifies/day) saturates the 30-day age window with
+  /// 30k+ rows; embedded deployments with limited disk fall over before
+  /// the age sweep ever fires. Cold start drops the oldest rows above
+  /// this cap **in addition to** the age-based sweep, so the table is
+  /// bounded by `min(age, count)`. 10k rows ≈ 1-2 MB at the current
+  /// column set — fits comfortably on every target device.
+  static const int verificationLogMaxRows = 10000;
+
   /// Maximum age, in days, that a stored face template is considered
   /// "fresh" for matching. Beyond this the owning user falls into the
   /// re-enrolment bucket (same UI surface as a model-version mismatch).

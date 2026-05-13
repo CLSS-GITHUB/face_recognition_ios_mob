@@ -373,29 +373,53 @@ final verificationLogRepositoryProvider =
 
 /// Cold-start sweep of `verification_logs`. Fires once per app launch
 /// (the provider is keepAlive so subsequent `.read`s are no-ops) and
-/// drops every row older than [FaceThresholds.verificationLogRetentionDays].
-/// Bounds the local audit trail without losing the recent history the
-/// Manage Users screen displays.
+/// applies **both** retention bounds:
+///   1. Age: drops every row older than
+///      [FaceThresholds.verificationLogRetentionDays].
+///   2. C2: drops every row beyond the
+///      [FaceThresholds.verificationLogMaxRows] most-recent (ordered
+///      by `at` descending). Catches heavy-use devices that saturate
+///      the age window faster than the 30-day sweep fires.
 ///
-/// Splash calls this fire-and-forget — a maintenance hiccup must never
-/// block routing. Errors are caught and surfaced as `0 rows purged`.
+/// Returns the total rows removed across both passes. Each pass is
+/// wrapped in its own try/catch so a failure on one doesn't lose the
+/// other's count — splash calls this fire-and-forget and a partial
+/// maintenance hiccup is preferable to discarding the recovery.
 final verificationLogPurgeProvider = FutureProvider<int>((ref) async {
   ref.keepAlive();
   final log = Logger('VerificationLogPurge');
+  final repo = ref.read(verificationLogRepositoryProvider);
+  var totalRemoved = 0;
+
+  final cutoff = DateTime.now().toUtc().subtract(
+        const Duration(days: FaceThresholds.verificationLogRetentionDays),
+      );
   try {
-    final repo = ref.read(verificationLogRepositoryProvider);
-    final cutoff = DateTime.now().toUtc().subtract(
-          const Duration(days: FaceThresholds.verificationLogRetentionDays),
-        );
-    final removed = await repo.purgeOlderThan(cutoff);
-    if (removed > 0) {
-      log.fine('Purged $removed verification_log rows older than $cutoff.');
+    final byAge = await repo.purgeOlderThan(cutoff);
+    if (byAge > 0) {
+      log.fine('Purged $byAge verification_log rows older than $cutoff.');
     }
-    return removed;
+    totalRemoved += byAge;
   } catch (e, st) {
-    log.warning('verification_log purge failed', e, st);
-    return 0;
+    log.warning('age-based verification_log purge failed', e, st);
   }
+
+  try {
+    final byCount = await repo.purgeBeyondCount(
+      FaceThresholds.verificationLogMaxRows,
+    );
+    if (byCount > 0) {
+      log.fine(
+        'Purged $byCount verification_log rows above '
+        'cap=${FaceThresholds.verificationLogMaxRows}.',
+      );
+    }
+    totalRemoved += byCount;
+  } catch (e, st) {
+    log.warning('count-bounded verification_log purge failed', e, st);
+  }
+
+  return totalRemoved;
 });
 
 /// Persistent rate limiter for verify attempts. Secure-storage backed so

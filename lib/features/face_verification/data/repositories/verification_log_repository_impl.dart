@@ -32,4 +32,8 @@ class VerificationLogRepositoryImpl implements VerificationLogRepository {
   @override
   Future<int> purgeOlderThan(DateTime cutoff) =>
       _dao.purgeOlderThan(cutoff);
+
+  @override
+  Future<int> purgeBeyondCount(int maxRows) =>
+      _dao.purgeBeyondCount(maxRows);
 }
