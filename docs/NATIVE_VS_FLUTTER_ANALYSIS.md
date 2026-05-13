@@ -2,11 +2,27 @@
 
 **Author:** Senior Android + Flutter Performance Engineering Review
 **Date:** 2026-05-13
-**Status:** Pre-implementation report — awaiting approval before changes
+**Status:** Phases A, B, C shipped (see `docs/NATIVE_VS_FLUTTER_PHASES_SUMMARY.md`)
 **Scope:** Architecture, performance, security, parity gaps, and migration roadmap
 **Projects analysed:**
 - Native Android: `D:\Development Projecrts\FaceRecognition`
+  ([github.com/KrishnaZyala/FaceRecognition](https://github.com/KrishnaZyala/FaceRecognition))
 - Flutter: `D:\Development Projecrts\face_ios_android`
+  ([github.com/CLSS-GITHUB/face_recognition_ios_mob](https://github.com/CLSS-GITHUB/face_recognition_ios_mob))
+
+> ⚠ **Ownership note added 2026-05-13.** The native Android project
+> analysed in this report is **third-party reference code** authored
+> by KrishnaZyala (MIT-licensed, ~2,330 LOC, demo-grade), not a
+> first-party project under this account's control. A separate
+> first-party Android project exists at
+> `D:\Development Projecrts\FaceVerfication` (marked "production ready"
+> in its own documentation). If a production-vs-production comparison
+> against that project is wanted, re-run this analysis with
+> `FaceVerfication` as the native baseline — the Flutter findings in
+> this report stay valid, but the §5 / §6 / §9 deltas would shift.
+> Phase D in §9 is re-framed accordingly: there is nothing for this
+> repo to "deprecate", since the native project belongs to a different
+> author.
 
 ---
 
@@ -376,9 +392,37 @@ GPU / NNAPI / Hexagon delegates are already configured through TFLite's native d
 | C2 | Verification_logs count-bounded purge (10k rows) | Heavy-use devices |
 | C3 | Per-user template versioning + auto-recapture at 180 days | Already partially specced |
 
-### Phase D — Native-side parity-down (optional)
+### Phase D — Native-side parity (re-framed 2026-05-13)
 
-If a stakeholder wants the native Android app brought up to match Flutter's capabilities, the work would be **far larger** than Flutter→native: implement persisted embeddings, encryption, GPU delegate, isolate-equivalent (coroutine pool), active liveness, motion gates, rate limiting, audit log. Estimate: ~6 engineer-weeks. **Recommendation: deprecate the native Android project and ship the Flutter app to Android** rather than dual-maintain.
+**Status:** Documentation-only outcome. See
+`docs/NATIVE_VS_FLUTTER_PHASES_SUMMARY.md` Phase D for the close-out.
+
+The original framing — "deprecate the native Android project and
+ship the Flutter app to Android" — assumed the native project was
+first-party. It is not: KrishnaZyala/FaceRecognition is third-party
+reference code (see the ownership note at the top of this report).
+This account cannot deprecate or parity-up a repo it doesn't own.
+
+What Phase D actually delivered:
+
+1. The relationship between the two projects is documented in
+   the analysis report header (this file) and the close-out
+   summary doc, so a future reader doesn't mistake the native
+   project for a first-party fork that needs maintenance.
+2. The Flutter `README.md` is refreshed to reflect the
+   post-Phase-A/B/C state.
+3. A separate first-party Android project
+   (`D:\Development Projecrts\FaceVerfication`) is noted as a
+   possible "true" baseline for a re-analysis if a stakeholder
+   needs production-vs-production comparison. No re-analysis is
+   performed in this pass.
+
+What Phase D explicitly does **not** do:
+
+- Modify the upstream `KrishnaZyala/FaceRecognition` repo.
+- Re-run the analysis against `D:\Development Projecrts\FaceVerfication`
+  (out of scope for this iteration).
+- Implement parity changes on either project.
 
 ### 9.1 Missing implementation report (relative to native)
 
@@ -422,12 +466,36 @@ Neither blocks Flutter from production. Both are addressed in Phase A / B above.
 
 ## 11. Final Implementation Roadmap
 
-1. **Approve this report.** No code changes yet.
-2. **Phase A (perf polish).** ~3 days, low-risk, measurable via `/debug/health` LatencyTracker.
-3. **Calibration study (parallel to A).** Export `verification_logs` CSV from a 1-2 week field run; tune `verifyThreshold`, `verifyUserMargin`, motion/blur thresholds against real failure modes.
-4. **Phase B (anti-spoof).** Source/calibrate PAD checkpoint, ship in shadow, flip to enforce.
-5. **Decide native Android app's fate.** Deprecate vs. parity-up — recommendation is deprecate.
-6. **Phase C (scale).** Only if template counts justify.
+Updated 2026-05-13 to reflect what's actually shipped. Full
+per-item breakdown lives in
+`docs/NATIVE_VS_FLUTTER_PHASES_SUMMARY.md`.
+
+1. ~~Approve this report.~~ ✓ Approved.
+2. ~~**Phase A (perf polish).**~~ ✓ Shipped (commit `098c04a`):
+   NNAPI tier, delegate cache, accurate enrolment detect, splash
+   prewarm. A1 (camera resolution) was already in place.
+3. ~~**Phase B (anti-spoof).**~~ ✓ Shipped (commit `f94723a`):
+   Gabor texture gate (B3) live in the verify path; PAD
+   procurement runbook + calibration helper (B1) staged. B2
+   (shadow→enforce flip) blocks on field data — runbook §6 has
+   the loop.
+4. **Calibration study.** Still pending — needs ≥ 2 weeks of
+   `verification_logs` from a deployed shadow build with a real
+   PAD checkpoint bundled. Tools are ready (`PadCalibration`
+   helper, CSV export from `/debug/health`).
+5. ~~**Phase C (scale).**~~ ✓ Shipped (commit `187549d`): C2
+   count-bounded log purge (10k rows). C1 (FFI matcher) deferred
+   with design note — trigger is > 5000 templates per device.
+   C3 was already complete in tree.
+6. ~~**Phase D (native parity).**~~ ✓ Re-framed (this commit):
+   third-party ownership of the native project means
+   "deprecate" doesn't apply. Documentation updates only.
+
+**What's still open after Phase D:**
+- PAD checkpoint bundling (B1 → ship a vetted Silent-Face TFLite)
+- 2-week shadow-mode field run for calibration data (B2)
+- Optional: re-analyse against `FaceVerfication` if a
+  production-vs-production comparison is wanted
 
 ---
 
